@@ -1,0 +1,17 @@
+# Repo scoped to Scripts/phantom_sim work; keep large binaries, data, and scratch out.
+*.ipynb
+*.ipynb.bak*
+*.pptx
+*.pdf
+*.pt
+*.npy
+*.npz
+*.gif
+*.pyc
+__pycache__/
+DataFiles/
+Figures/
+scratchpad/
+.superpowers/
+_cache_*
+~$*
