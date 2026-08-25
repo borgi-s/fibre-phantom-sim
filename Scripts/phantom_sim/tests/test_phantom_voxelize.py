@@ -40,3 +40,15 @@ def test_tilted_orientation_has_correct_angle():
     # tilt of 2 um per 2 um slice = 45 deg between along-axis and x
     ang = np.degrees(np.arccos(abs(n[0, 0])))
     assert abs(ang - 45.0) < 1.0
+
+
+def test_bundle_orientations_axis_permutation():
+    cfg, radii = straight_bundle(Z=8, n_side=2)
+    # Test axis=1: along-fibre component should be at index 1
+    n1 = bundle_orientations(cfg, axial_um=2.0, axis=1)
+    assert n1.shape == (4, 3)
+    assert np.allclose(np.abs(n1[0]), np.array([0.0, 1.0, 0.0]), atol=1e-6)
+    # Test axis=2: along-fibre component should be at index 2
+    n2 = bundle_orientations(cfg, axial_um=2.0, axis=2)
+    assert n2.shape == (4, 3)
+    assert np.allclose(np.abs(n2[0]), np.array([0.0, 0.0, 1.0]), atol=1e-6)

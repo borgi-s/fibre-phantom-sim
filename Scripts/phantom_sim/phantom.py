@@ -49,8 +49,9 @@ def bundle_orientations(configuration, axial_um, axis=0):
     base = np.stack([np.full(N, axial_um), dy, dx], axis=1)   # (N,3) order (along,y,x)
     base /= np.linalg.norm(base, axis=1, keepdims=True)
     # permute components to match np.moveaxis(vol, 0, axis)
-    perm = np.moveaxis(np.arange(3), 0, axis)
-    return base[:, perm]
+    order = [n for n in range(3) if n != 0]
+    order.insert(axis, 0)
+    return base[:, order]
 
 
 def ground_truth_table(configuration, radii, axial_um, axis=0):
