@@ -9,6 +9,7 @@
 *.gif
 *.pyc
 __pycache__/
+.pytest_cache/
 DataFiles/
 Figures/
 scratchpad/
