@@ -62,3 +62,35 @@ def ground_truth_table(configuration, radii, axial_um, axis=0):
         "orientation": bundle_orientations(configuration, axial_um, axis),
         "radius_um": np.asarray(radii, dtype=np.float64),
     }
+
+
+def pack_bundle(domain_radius_um, fvf, r_mean_um, r_sigma_um=0.0,
+                n_slices=64, misalignment="none", iters=200, seed=0):
+    """Run vendored fibre-pack and return the packing as numpy arrays.
+
+    Uses torch internally (fibre-pack is torch-based). CPU is sufficient.
+
+    fvf: fibre volume fraction as a 0-1 FRACTION (public interface). The
+    vendored `from_fvf` expects a PERCENT convention (e.g. 40 for 40%),
+    so it is scaled by 100 internally before being passed through.
+
+    misalignment: a vendored fibre-pack preset STRING ('none', 'very low',
+    'moderate', 'high', 'very high') or a dict of the raw parameters; passed
+    straight through to `initialize_end_slice`. Default "none". Do not use
+    the 'low' preset: it has an upstream UnboundLocalError bug in the
+    vendored code.
+    """
+    import torch
+    from phantom_sim.third_party.fibre_pack import fibre_packer as fp
+
+    rng = torch.Generator().manual_seed(int(seed))
+    packer = fp.from_fvf(domain_radius_um, fvf * 100.0, r_mean_um, r_sigma_um, rng=rng)
+    packer.initialize_start_slice()
+    packer.initialize_end_slice(misalignment)
+    packer.interpolate_configuration(n_slices)
+    packer.optimize_configuration(iters=iters)
+
+    configuration = np.asarray(packer.configuration.detach().cpu().numpy(),
+                               dtype=np.float64)     # (Z, 2, N)
+    radii = np.asarray(packer.radii.detach().cpu().numpy(), dtype=np.float64)
+    return configuration, radii
