@@ -5,8 +5,7 @@ metadata sidecar.
 This-box only (pulls in torch via `pack_bundle`; CPU is fine, no CUDA needed).
 
 Usage (from Scripts/, using the 3d_recon env interpreter):
-    & "C:\\Users\\borgi\\anaconda3\\envs\\3d_recon\\python.exe" phantom_sim/make_phantom.py ^
-        --out ..\\DataFiles\\phantom_sim\\phantom_dev
+    & "C:\\Users\\borgi\\anaconda3\\envs\\3d_recon\\python.exe" -m phantom_sim.make_phantom --out ..\\DataFiles\\phantom_sim\\phantom_dev
 
 Outputs under --out:
     phantom_mu.npy       float32 attenuation volume, shape (Z or ny/nx permuted per --axis)
@@ -38,16 +37,16 @@ def build_parser():
     p.add_argument("--n-slices", type=int, default=64,
                    help="Number of packing slices along the fibre axis.")
     p.add_argument("--misalignment", default="none",
-                   help="Vendored fibre-pack preset string ('none', 'very low', 'moderate', "
-                        "'high', 'very high') or a dict of raw params. Avoid 'low': it has an "
-                        "upstream UnboundLocalError bug in the vendored code.")
+                   help="Vendored fibre-pack preset string: one of 'none', 'very low', "
+                        "'moderate', 'high', 'very high'. Avoid 'low': it has an upstream "
+                        "UnboundLocalError bug in the vendored code.")
     p.add_argument("--iters", type=int, default=200, help="Packing optimisation iterations.")
     p.add_argument("--seed", type=int, default=0, help="RNG seed for the packer.")
 
     # voxelisation params (see phantom.voxelize_config)
     p.add_argument("--ny", type=int, default=300, help="Transverse grid height, voxels.")
     p.add_argument("--nx", type=int, default=300, help="Transverse grid width, voxels.")
-    p.add_argument("--voxel-um", type=float, default=1.0, help="Transverse voxel size, um.")
+    p.add_argument("--voxel-um", type=float, default=2.0, help="Transverse voxel size, um.")
     p.add_argument("--axis", type=int, default=0, help="Array axis the fibre direction is moved to.")
     p.add_argument("--mu-fibre", type=float, default=0.30, help="Fibre linear attenuation coeff.")
     p.add_argument("--mu-matrix", type=float, default=0.28, help="Matrix (resin) attenuation coeff.")
