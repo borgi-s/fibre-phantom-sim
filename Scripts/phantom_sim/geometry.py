@@ -49,14 +49,37 @@ def build_plenoptic_geometry(src_vu_pix, det_vu_pix, vol_z0_pix, detector_z,
     return np.hstack([src_xyz, det_xyz, dir_x, dir_y])
 
 
+def _vol_geom_args(vol_shape):
+    """Map an array shape (nz, ny, nx) to astra.create_vol_geom's argument order.
+
+    In this module array dim 0 is the special axis (CT rotation axis / plenoptic beam
+    axis), which must land on ASTRA's Z (slices) so that astra.geom_size(vol_geom)
+    equals the array shape and the volume tensor links without transposition. ASTRA's
+    create_vol_geom takes (GridRowCount=Y, GridColCount=X, GridSliceCount=Z) and its
+    data order is (Z, Y, X), so (nz, ny, nx) -> (ny, nx, nz).
+    """
+    nz, ny, nx = vol_shape
+    return ny, nx, nz
+
+
+def _vol_geom_args_windowed(vol_shape, vol_z_offset_pix=0):
+    """Windowed create_vol_geom args for a (nz, ny, nx) array, voxel size 1 unit.
+
+    Returns (Y, X, Z, minX, maxX, minY, maxY, minZ, maxZ); the vol_z_offset_pix shift
+    is applied on the beam axis only (ASTRA Z = array dim 0 = nz).
+    """
+    nz, ny, nx = vol_shape
+    return (ny, nx, nz,
+            -nx / 2.0, nx / 2.0,
+            -ny / 2.0, ny / 2.0,
+            -nz / 2.0 + vol_z_offset_pix, nz / 2.0 + vol_z_offset_pix)
+
+
 def make_plenoptic_projector(vol_recon_size, geometry, sinogram_size,
                              super_sampling=2, vol_z_offset_pix=0):
     import astra
-    rows, cols, slices = vol_recon_size
-    vol_geom = astra.create_vol_geom(rows, cols, slices,
-                                     -cols / 2, cols / 2, -rows / 2, rows / 2,
-                                     -slices / 2 + vol_z_offset_pix,
-                                     slices / 2 + vol_z_offset_pix)
+    vol_geom = astra.create_vol_geom(
+        *_vol_geom_args_windowed(vol_recon_size, vol_z_offset_pix))
     proj_geom = astra.create_proj_geom("cone_vec", sinogram_size[0], sinogram_size[1], geometry)
     opts = {"VoxelSuperSampling": super_sampling, "DetectorSuperSampling": super_sampling}
     return astra.create_projector("cuda3d", proj_geom, vol_geom, opts), vol_geom
@@ -64,7 +87,7 @@ def make_plenoptic_projector(vol_recon_size, geometry, sinogram_size,
 
 def make_ct_projector(vol_recon_size, vectors, sinogram_size, super_sampling=2):
     import astra
-    vol_geom = astra.create_vol_geom(*vol_recon_size)
+    vol_geom = astra.create_vol_geom(*_vol_geom_args(vol_recon_size))
     proj_geom = astra.create_proj_geom("cone_vec", sinogram_size[0], sinogram_size[1], vectors)
     opts = {"VoxelSuperSampling": super_sampling, "DetectorSuperSampling": super_sampling}
     return astra.create_projector("cuda3d", proj_geom, vol_geom, opts), vol_geom
