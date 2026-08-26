@@ -147,10 +147,15 @@ def build_parser():
     p.add_argument("--ny", type=int, default=300, help="Transverse grid height, voxels.")
     p.add_argument("--nx", type=int, default=300, help="Transverse grid width, voxels.")
     p.add_argument("--voxel-um", type=float, default=2.0, help="Voxel size, um.")
-    p.add_argument("--mu-fibre", type=float, default=0.30,
-                   help="Fibre (glass) linear attenuation coeff.")
-    p.add_argument("--mu-matrix", type=float, default=0.28,
-                   help="Matrix (resin) linear attenuation coeff.")
+    p.add_argument("--mu-fibre", type=float, default=6.2e-4,
+                   help="Fibre (glass) per-voxel absorbance (mu times voxel size); ASTRA "
+                        "sums voxel values over unit-length rays, so this must be per-voxel "
+                        "absorbance, NOT mu in 1/cm, or line integrals saturate the beam.")
+    p.add_argument("--mu-matrix", type=float, default=3.5e-4,
+                   help="Matrix (resin) per-voxel absorbance; see --mu-fibre. Reference "
+                        "PlenoXFiber scale (matrix 3.5e-4, fibre 6.2e-4, ~75 percent "
+                        "contrast); override with calibrated 12 keV values as per-voxel "
+                        "absorbance.")
 
     # plenoptic geometry params: study-scale defaults match the calibrated 260507 pin
     # calibration (GEOM_MODE A, Scripts/plenoptic-NewAstra-Al12thr_Sep05_combined_SRC.py
@@ -187,9 +192,11 @@ def build_parser():
     p.add_argument("--i0", type=float, default=5e4, help="Incident photon flux (Poisson).")
     p.add_argument("--n-iter", type=int, default=200,
                    help="TV solver iterations per stage/solve.")
-    p.add_argument("--lr", type=float, default=1e-2, help="Adam learning rate.")
-    p.add_argument("--tv-weight", type=float, default=1e-4,
-                   help="Shared isotropic TV weight, applied identically to all 3 axes.")
+    p.add_argument("--lr", type=float, default=1e-1, help="Adam learning rate.")
+    p.add_argument("--tv-weight", type=float, default=0.5,
+                   help="Squared-L2 gradient penalty weight along the fibre/beam axis "
+                        "(dim 0) only; transverse axes unpenalised, matching the reference "
+                        "along-fibre smoothing. May need one GPU tuning pass.")
     p.add_argument("--target-psnr", type=float, default=28.0,
                    help="PSNR (dB) threshold used for iters_to_threshold / "
                         "time_to_threshold (first_crossing).")
@@ -296,7 +303,11 @@ def main(argv=None):
             vol.shape, geom_n, sinogram_size=sinogram_size_n, super_sampling=args.super_sampling)
         return XrayOperator(pid_n), proj_n
 
-    tv_weights = (args.tv_weight,) * 3
+    # Fibres run along the beam axis = array dim 0, so the strong squared-L2 TV goes
+    # on dim 0 only; the transverse axes stay unpenalised so fibre cross-sections stay
+    # sharp. Non-negativity (lower_clamp=0.0) stops the plenoptic missing-wedge
+    # null-space from blowing up, which is what wrecked the warm chain before.
+    tv_weights = (args.tv_weight, 0.0, 0.0)
 
     def geometry_meta():
         return {
@@ -359,6 +370,7 @@ def main(argv=None):
         recon, history = reconstruct(
             A_n, proj_n, mask=None, n_iter=n_iter, lr=args.lr, tv_weights=tv_weights,
             x_init=None, log_every=log_every, gt=vol, target_psnr=target_psnr,
+            lower_clamp=0.0,
         )
         p = psnr(recon, vol)
         s = ssim(recon, vol)
@@ -378,6 +390,7 @@ def main(argv=None):
         recon, history = reconstruct(
             A_n, proj_n, mask=None, n_iter=n_iter, lr=args.lr, tv_weights=tv_weights,
             x_init=x, log_every=log_every, gt=vol, target_psnr=target_psnr,
+            lower_clamp=0.0,
         )
         x = recon
         cumulative_iters += n_iter

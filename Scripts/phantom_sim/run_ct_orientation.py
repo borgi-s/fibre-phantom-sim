@@ -77,10 +77,16 @@ def build_parser():
     p.add_argument("--ny", type=int, default=300, help="Transverse grid height, voxels.")
     p.add_argument("--nx", type=int, default=300, help="Transverse grid width, voxels.")
     p.add_argument("--voxel-um", type=float, default=2.0, help="Voxel size, um.")
-    p.add_argument("--mu-fibre", type=float, default=0.30,
-                   help="Fibre (glass) linear attenuation coeff.")
-    p.add_argument("--mu-matrix", type=float, default=0.28,
-                   help="Matrix (resin) linear attenuation coeff.")
+    p.add_argument("--mu-fibre", type=float, default=6.2e-4,
+                   help="Fibre (glass) per-voxel absorbance (mu times voxel size, ASTRA "
+                        "sums voxel values over unit-length rays). Reference-scale value; "
+                        "ASTRA integrates this directly, so it must be mu[1/length] times "
+                        "voxel_size, NOT mu in 1/cm, or line integrals saturate the beam.")
+    p.add_argument("--mu-matrix", type=float, default=3.5e-4,
+                   help="Matrix (resin) per-voxel absorbance; see --mu-fibre. Reference "
+                        "PlenoXFiber scale (matrix 3.5e-4, fibre 6.2e-4, ~75 percent "
+                        "contrast); override with your calibrated 12 keV values rescaled "
+                        "to per-voxel absorbance.")
     p.add_argument("--axial-um", type=float, default=None,
                    help="Physical spacing per packing slice along the fibre axis, um. "
                         "Defaults to --voxel-um (isotropic voxels).")
@@ -103,10 +109,12 @@ def build_parser():
     # forward model / reconstruction, shared identically across both orientations
     p.add_argument("--i0", type=float, default=5e4, help="Incident photon flux (Poisson).")
     p.add_argument("--n-iter", type=int, default=200, help="TV solver iterations.")
-    p.add_argument("--lr", type=float, default=1e-2, help="Adam learning rate.")
-    p.add_argument("--tv-weight", type=float, default=1e-4,
-                   help="Shared isotropic TV weight, applied identically to all 3 axes "
-                        "(deliberately orientation-agnostic for a fair comparison).")
+    p.add_argument("--lr", type=float, default=1e-1, help="Adam learning rate.")
+    p.add_argument("--tv-weight", type=float, default=0.5,
+                   help="Squared-L2 gradient penalty weight applied along each "
+                        "orientation's OWN fibre axis only (dim 0 for axis0, dim 1 for "
+                        "axis1), transverse axes unpenalised, matching the reference "
+                        "along-fibre smoothing. May need one GPU tuning pass.")
     p.add_argument("--log-every", type=int, default=10,
                    help="Convergence-history logging interval, iterations.")
     return p
@@ -195,10 +203,15 @@ def main(argv=None):
         volt = torch.tensor(vol, device="cuda")
         proj = simulate_projections(A, volt, i0=args.i0, seed=args.seed)
 
+        # Strong squared-L2 TV along THIS orientation's fibre axis only (the fibres
+        # run along array dim `axis` after voxelize_config placed them there); the
+        # transverse axes stay unpenalised so fibre cross-sections keep their edges.
+        tv_weights = [0.0, 0.0, 0.0]
+        tv_weights[axis] = args.tv_weight
         recon, history = reconstruct(
             A, proj, mask=None, n_iter=n_iter, lr=args.lr,
-            tv_weights=(args.tv_weight,) * 3, x_init=None,
-            log_every=log_every, gt=vol, target_psnr=None,
+            tv_weights=tuple(tv_weights), x_init=None,
+            log_every=log_every, gt=vol, target_psnr=None, lower_clamp=0.0,
         )
 
         p = psnr(recon, vol)

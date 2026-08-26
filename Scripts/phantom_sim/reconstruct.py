@@ -25,22 +25,34 @@ def first_crossing(history, target, key="metric"):
 
 
 def _tv_isotropic_aniso(vol, weights):
+    """Squared-L2 gradient penalty, independent per-axis weights (wz, wy, wx).
+
+    Matches the reference PlenoXFiber solver: mean(diff**2) per axis, so a strong
+    weight on the fibre axis (dim 0) smooths along coherent fibres without the
+    edge-preserving-but-noisy behaviour of an L1 total variation, and the transverse
+    axes can be left unpenalised so fibre cross-sections stay sharp.
+    """
     import torch
     wz, wy, wx = weights
     tv = 0.0
     if wz:
-        tv = tv + wz * torch.mean(torch.abs(vol[1:, :, :] - vol[:-1, :, :]))
+        tv = tv + wz * torch.mean((vol[1:, :, :] - vol[:-1, :, :]) ** 2)
     if wy:
-        tv = tv + wy * torch.mean(torch.abs(vol[:, 1:, :] - vol[:, :-1, :]))
+        tv = tv + wy * torch.mean((vol[:, 1:, :] - vol[:, :-1, :]) ** 2)
     if wx:
-        tv = tv + wx * torch.mean(torch.abs(vol[:, :, 1:] - vol[:, :, :-1]))
+        tv = tv + wx * torch.mean((vol[:, :, 1:] - vol[:, :, :-1]) ** 2)
     return tv
 
 
 def reconstruct(A, projections, mask=None, n_iter=200, lr=1e-2,
                 tv_weights=(0.0, 0.0, 0.0), x_init=None, log_every=10,
-                gt=None, target_psnr=None, lower_clamp=None):
-    """Gradient-descent TV recon. Returns (recon numpy float32, history)."""
+                gt=None, target_psnr=None, lower_clamp=None, upper_clamp=None):
+    """Gradient-descent TV recon. Returns (recon numpy float32, history).
+
+    lower_clamp/upper_clamp apply a per-iteration box constraint on x (the reference
+    solver uses [0, 10]); non-negativity (lower_clamp=0.0) is the main stabiliser
+    against the missing-wedge null-space blowing up.
+    """
     import torch
     from phantom_sim.geometry import make_projection_fn
     from phantom_sim.metrics import psnr as psnr_fn
@@ -71,9 +83,9 @@ def reconstruct(A, projections, mask=None, n_iter=200, lr=1e-2,
         loss = data_loss + tv_loss
         loss.backward()
         opt.step()
-        if lower_clamp is not None:
+        if lower_clamp is not None or upper_clamp is not None:
             with torch.no_grad():
-                x.clamp_(min=lower_clamp)
+                x.clamp_(min=lower_clamp, max=upper_clamp)
         if it % log_every == 0 or it == n_iter - 1:
             metric = None
             if gt_np is not None:
