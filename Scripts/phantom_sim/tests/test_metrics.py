@@ -1,6 +1,17 @@
 import numpy as np
+import pytest
 from scipy.ndimage import gaussian_filter
-from phantom_sim.metrics import register, psnr, directional_sharpness, resolution_along_across
+from phantom_sim.metrics import (
+    register, psnr, directional_sharpness, resolution_along_across, corr_with_gt,
+)
+
+
+def test_corr_with_gt_is_scale_invariant_and_bounded():
+    g = np.random.default_rng(0).random((10, 10, 10))
+    assert corr_with_gt(g, g) == pytest.approx(1.0)
+    assert corr_with_gt(3.0 * g + 5.0, g) == pytest.approx(1.0)   # gain+offset invariant
+    assert corr_with_gt(-g, g) == pytest.approx(-1.0)             # anti-correlated
+    assert corr_with_gt(np.zeros_like(g), g) == 0.0              # degenerate -> 0, no nan
 
 
 def test_register_recovers_gain_and_offset():

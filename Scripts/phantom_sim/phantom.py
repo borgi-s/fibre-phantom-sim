@@ -121,3 +121,20 @@ def pack_bundle(domain_radius_um, fvf, r_mean_um, r_sigma_um=0.0,
                                dtype=np.float64)     # (Z, 2, N)
     radii = np.asarray(packer.radii.detach().cpu().numpy(), dtype=np.float64)
     return configuration, radii
+
+
+def make_straight_fibre_phantom(nz, ny, nx, voxel_um, domain_radius_um, fvf, r_mean_um,
+                                mu_fibre, mu_matrix, iters, seed, supersample=4):
+    """Pack a 2D fibre cross-section and extrude it straight along dim 0.
+
+    Returns (vol float32 (nz, ny, nx), radii). Straight (unidirectional) fibres: pack a
+    2-slice aligned configuration (cheap), voxelise a single transverse slice (anti-aliased),
+    then repeat over nz so every slice is identical. Keeps deep volumes cheap to build.
+    """
+    cfg, radii = pack_bundle(domain_radius_um=domain_radius_um, fvf=fvf, r_mean_um=r_mean_um,
+                             r_sigma_um=0.0, n_slices=2, misalignment="none",
+                             iters=iters, seed=seed)
+    one = voxelize_config(cfg[:1], radii, (ny, nx), voxel_um=voxel_um, axis=0,
+                          mu_fibre=mu_fibre, mu_matrix=mu_matrix, supersample=supersample)
+    vol = np.repeat(one, nz, axis=0)
+    return np.ascontiguousarray(vol, dtype=np.float32), radii

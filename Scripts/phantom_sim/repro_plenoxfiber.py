@@ -40,24 +40,7 @@ from pathlib import Path
 
 import numpy as np
 
-from phantom_sim.phantom import pack_bundle, voxelize_config
-
-
-def make_straight_fibre_phantom(nz, ny, nx, voxel_um, domain_radius_um, fvf, r_mean_um,
-                                mu_fibre, mu_matrix, iters, seed):
-    """Pack a 2D fibre cross-section and extrude it straight along the beam axis (dim 0).
-
-    Returns (vol float32 (nz, ny, nx), radii). Packing is done on a 2-slice aligned
-    configuration (cheap), a single transverse slice is voxelised, then repeated over nz
-    so all z-slices are identical (a unidirectional composite).
-    """
-    cfg, radii = pack_bundle(domain_radius_um=domain_radius_um, fvf=fvf, r_mean_um=r_mean_um,
-                             r_sigma_um=0.0, n_slices=2, misalignment="none",
-                             iters=iters, seed=seed)
-    one = voxelize_config(cfg[:1], radii, (ny, nx), voxel_um=voxel_um, axis=0,
-                          mu_fibre=mu_fibre, mu_matrix=mu_matrix)      # (1, ny, nx)
-    vol = np.repeat(one, nz, axis=0)                                   # (nz, ny, nx)
-    return np.ascontiguousarray(vol, dtype=np.float32), radii
+from phantom_sim.phantom import make_straight_fibre_phantom
 
 
 def write_meta(path, meta):

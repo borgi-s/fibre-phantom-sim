@@ -6,7 +6,7 @@ reference (per-voxel absorbance, matrix ~3.5e-4, fibre ~6.2e-4).
 """
 import numpy as np
 
-from phantom_sim.repro_plenoxfiber import make_straight_fibre_phantom
+from phantom_sim.phantom import make_straight_fibre_phantom
 
 
 def test_straight_phantom_is_extruded_and_scaled():

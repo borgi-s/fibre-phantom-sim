@@ -44,3 +44,18 @@ def resolution_along_across(vol, fibre_axis):
     across_mean = float(np.mean(across))
     return {"along": along, "across_mean": across_mean,
             "ratio": float(along / across_mean) if across_mean else 0.0}
+
+
+def corr_with_gt(recon, gt):
+    """Pearson correlation of recon with gt (scale and offset invariant).
+
+    A robust fidelity score for low-contrast fibre phantoms, where global PSNR/SSIM sit at
+    the background-dominated floor: it measures whether the recon reproduces the spatial
+    fibre pattern regardless of absolute scale. Valid only when gt is the EXACT ground
+    truth from the same run (not a separately regenerated phantom with different packing).
+    """
+    a = np.asarray(recon, dtype=np.float64).ravel()
+    b = np.asarray(gt, dtype=np.float64).ravel()
+    if a.std() == 0 or b.std() == 0:
+        return 0.0
+    return float(np.corrcoef(a, b)[0, 1])
