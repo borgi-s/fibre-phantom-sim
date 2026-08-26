@@ -31,7 +31,9 @@ def build_parser():
                    help="Packing domain (bundle cross-section) radius, um.")
     p.add_argument("--fvf", type=float, default=0.3,
                    help="Fibre volume fraction as a 0-1 fraction.")
-    p.add_argument("--r-mean-um", type=float, default=3.5, help="Mean fibre radius, um.")
+    p.add_argument("--r-mean-um", type=float, default=6.0,
+                   help="Mean fibre radius, um (glass, ~12um diameter = 6um radius; "
+                        "typical E-glass filament 5-13um).")
     p.add_argument("--r-sigma-um", type=float, default=0.0,
                    help="Fibre radius std dev, um (0 = uniform radii).")
     p.add_argument("--n-slices", type=int, default=64,

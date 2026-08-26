@@ -107,7 +107,9 @@ def build_parser():
     p.add_argument("--domain-radius-um", type=float, default=400.0,
                    help="Fibre-bundle cross-section radius, um.")
     p.add_argument("--fvf", type=float, default=0.3, help="Fibre volume fraction.")
-    p.add_argument("--r-mean-um", type=float, default=3.5, help="Mean fibre radius, um.")
+    p.add_argument("--r-mean-um", type=float, default=6.0,
+                   help="Mean fibre radius, um (glass, ~12um diameter = 6um radius). At "
+                        "2um voxel this is a 6-voxel disc, anti-aliased to a clean circle.")
     p.add_argument("--mu-fibre", type=float, default=6.2e-4, help="Fibre per-voxel absorbance.")
     p.add_argument("--mu-matrix", type=float, default=3.5e-4, help="Matrix per-voxel absorbance.")
     p.add_argument("--pack-iters", type=int, default=200, help="2D packing iterations.")
