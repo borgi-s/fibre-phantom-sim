@@ -4,6 +4,27 @@ from phantom_sim.phantom import voxelize_config, bundle_orientations
 from phantom_sim.tests.fixtures.make_synth_config import straight_bundle, tilted_single
 
 
+def test_supersampling_gives_soft_circular_edges():
+    # A small fibre (r = 3 vox) rasterised hard is a blocky square/plus; anti-aliased
+    # voxelisation must give edge voxels PARTIAL coverage (mu strictly between matrix and
+    # fibre) so the disc reads as a circle, and its area estimate is at least as accurate.
+    cfg, radii = straight_bundle(Z=1, n_side=1, radius_um=6.0)  # 1 fibre, r=3 vox at voxel 2
+    hard = voxelize_config(cfg, radii, (41, 41), 2.0, axis=0, mu_fibre=1.0, mu_matrix=0.0,
+                           supersample=1)
+    aa = voxelize_config(cfg, radii, (41, 41), 2.0, axis=0, mu_fibre=1.0, mu_matrix=0.0,
+                         supersample=4)
+    # hard mask is binary; anti-aliased has intermediate coverage voxels
+    assert set(np.unique(np.round(hard, 6)).tolist()).issubset({0.0, 1.0})
+    partial = aa[(aa > 1e-4) & (aa < 1.0 - 1e-4)]
+    assert partial.size > 8                       # a ring of soft edge voxels
+    # coverage-summed area is closer to the true disc area than the hard count
+    true_area = np.pi * 3.0 ** 2
+    assert abs(float(aa.sum()) - true_area) <= abs(float(hard.sum()) - true_area) + 1e-6
+    # interior stays full fibre, exterior stays matrix
+    assert aa.max() == np.float32(1.0)
+    assert aa.min() == np.float32(0.0)
+
+
 def test_single_fibre_disc_area():
     cfg, radii = straight_bundle(Z=6, n_side=1, radius_um=6.0)  # 1 fibre at origin
     voxel_um = 2.0

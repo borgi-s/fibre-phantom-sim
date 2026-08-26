@@ -3,29 +3,56 @@ import numpy as np
 
 
 def voxelize_config(configuration, radii, transverse_shape, voxel_um,
-                    axis=0, mu_fibre=0.30, mu_matrix=0.28):
+                    axis=0, mu_fibre=0.30, mu_matrix=0.28, supersample=4):
     """Rasterise per-slice fibre discs into an attenuation volume.
 
     configuration: (Z, 2, N) fibre centres in um, index 0 = x, index 1 = y.
     radii: (N,) fibre radii in um.
     transverse_shape: (ny, nx) transverse voxel grid.
     Fibre axis is built as array dim 0 then moved to `axis`.
+
+    `supersample` sets anti-aliasing: each voxel's attenuation is
+    `mu_matrix + coverage * (mu_fibre - mu_matrix)`, where `coverage` is the fraction of
+    the voxel area inside the disc, estimated on a supersample x supersample subgrid. This
+    is physically correct partial-volume mixing and, for the small ~3-voxel fibres here,
+    renders as smooth circles rather than the blocky squares/plus-signs a hard mask
+    (supersample=1) produces. Fibres are packed non-overlapping, so where discs touch the
+    larger coverage wins (`np.maximum`). Only a small bounding box per fibre is touched, so
+    anti-aliasing does not scale with the full transverse grid.
     """
     configuration = np.asarray(configuration, dtype=np.float64)
     radii = np.asarray(radii, dtype=np.float64)
     Z, _, N = configuration.shape
     ny, nx = transverse_shape
     vol = np.full((Z, ny, nx), mu_matrix, dtype=np.float32)
-    yy, xx = np.mgrid[0:ny, 0:nx]
     cx0 = (nx - 1) / 2.0
     cy0 = (ny - 1) / 2.0
+    ss = max(1, int(supersample))
+    sub = (np.arange(ss) + 0.5) / ss - 0.5          # subpixel offsets in (-0.5, 0.5)
+    delta = mu_fibre - mu_matrix
     for zi in range(Z):
         for k in range(N):
             cx = configuration[zi, 0, k] / voxel_um + cx0
             cy = configuration[zi, 1, k] / voxel_um + cy0
             r = radii[k] / voxel_um
-            mask = (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
-            vol[zi][mask] = mu_fibre
+            x0 = max(0, int(np.floor(cx - r - 1)))
+            x1 = min(nx, int(np.ceil(cx + r + 1)) + 1)
+            y0 = max(0, int(np.floor(cy - r - 1)))
+            y1 = min(ny, int(np.ceil(cy + r + 1)) + 1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            xs = np.arange(x0, x1)
+            ys = np.arange(y0, y1)
+            gx, gy = np.meshgrid(xs, ys)            # (h, w) voxel centres
+            r2 = r * r
+            cover = np.zeros(gx.shape, dtype=np.float64)
+            for dy in sub:
+                for dx in sub:
+                    cover += (gx + dx - cx) ** 2 + (gy + dy - cy) ** 2 <= r2
+            cover /= ss * ss
+            patch = mu_matrix + cover * delta
+            region = vol[zi, y0:y1, x0:x1]
+            np.maximum(region, patch.astype(np.float32), out=region)
     if axis != 0:
         vol = np.moveaxis(vol, 0, axis)
     return np.ascontiguousarray(vol, dtype=np.float32)
