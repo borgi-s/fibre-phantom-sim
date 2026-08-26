@@ -67,7 +67,7 @@ from pathlib import Path
 
 import numpy as np
 
-from phantom_sim.phantom import pack_bundle, voxelize_config
+from phantom_sim.phantom import make_straight_fibre_phantom
 from phantom_sim.reconstruct import first_crossing
 
 
@@ -76,16 +76,17 @@ def write_meta(path, meta):
         json.dump(meta, f, indent=2)
 
 
-def assemble_stage_entry(n, psnr_val, ssim_val, resolution, history, target_psnr):
+def assemble_stage_entry(n, corr_val, psnr_val, ssim_val, resolution, history, target_psnr):
     """Pure metrics-assembly for one (strategy, N) stage.
 
-    No astra/torch here: psnr_val, ssim_val, resolution and history are already-
+    No astra/torch here: corr_val, psnr_val, ssim_val, resolution and history are already-
     computed plain python/numpy values, so this is directly unit-testable on this box
-    with fake inputs (no GPU needed).
+    with fake inputs (no GPU needed). corr_with_gt is the headline fidelity metric.
     """
     iters_thr, time_thr = first_crossing(history, target_psnr, key="metric")
     return {
         "N": int(n),
+        "corr_with_gt": float(corr_val),
         "psnr": float(psnr_val),
         "ssim": float(ssim_val),
         "resolution": resolution,
@@ -129,15 +130,10 @@ def build_parser():
                    help="Mean fibre radius, um (glass, ~12um diameter = 6um radius; "
                         "typical E-glass filament 5-13um). At 2um voxel this is a 6-voxel "
                         "disc, which anti-aliased renders as a clean circle.")
-    p.add_argument("--r-sigma-um", type=float, default=0.0,
-                   help="Fibre radius std dev, um (0 = uniform radii).")
-    p.add_argument("--n-slices", type=int, default=64,
-                   help="Number of packing slices along the fibre axis.")
-    p.add_argument("--misalignment", default="none",
-                   help="Vendored fibre-pack preset string: one of 'none', 'very low', "
-                        "'moderate', 'high', 'very high'. Avoid 'low': it has an upstream "
-                        "UnboundLocalError bug in the vendored code.")
-    p.add_argument("--iters", type=int, default=200, help="Packing optimisation iterations.")
+    p.add_argument("--depth", type=int, default=512,
+                   help="Fibre-axis (beam-axis) length in voxels; deep volume so line "
+                        "integrals accumulate strong along-fibre contrast.")
+    p.add_argument("--iters", type=int, default=200, help="2D packing optimisation iterations.")
     p.add_argument("--seed", type=int, default=0,
                    help="Base RNG seed for packing and per-z-position Poisson noise "
                         "(z-position i draws with seed + i, for independent noise "
@@ -192,7 +188,9 @@ def build_parser():
                    help="ASTRA voxel/detector supersampling factor.")
 
     # forward model / reconstruction, shared identically across both strategies and all N
-    p.add_argument("--i0", type=float, default=5e4, help="Incident photon flux (Poisson).")
+    p.add_argument("--i0", type=float, default=0.0,
+                   help="0 = clean line integrals (no noise); >0 = Poisson photon noise at "
+                        "that incident flux, drawn per z-position (the SNR dial).")
     p.add_argument("--n-iter", type=int, default=200,
                    help="TV solver iterations per stage/solve.")
     p.add_argument("--lr", type=float, default=1e-1, help="Adam learning rate.")
@@ -213,17 +211,17 @@ def main(argv=None):
 
     if args.smoke:
         domain_radius_um = 40.0
-        r_mean_um = 3.0
-        n_slices = 24
-        iters = 10
-        ny = nx = 48
+        r_mean_um = 6.0
+        depth = 32
+        iters = 20
+        ny = nx = 64
         n_grid = 3
-        n_iter = 5
+        n_iter = 8
         log_every = 1
     else:
         domain_radius_um = args.domain_radius_um
         r_mean_um = args.r_mean_um
-        n_slices = args.n_slices
+        depth = args.depth
         iters = args.iters
         ny = args.ny
         nx = args.nx
@@ -236,16 +234,13 @@ def main(argv=None):
     sdd_mm = args.sdd_mm
     target_psnr = args.target_psnr
 
-    configuration, radii = pack_bundle(
-        domain_radius_um=domain_radius_um,
-        fvf=args.fvf,
-        r_mean_um=r_mean_um,
-        r_sigma_um=args.r_sigma_um,
-        n_slices=n_slices,
-        misalignment=args.misalignment,
-        iters=iters,
-        seed=args.seed,
-    )
+    # One deep straight bundle: fibres run along the beam axis (array dim 0).
+    print(f"Building deep straight bundle ({depth}, {ny}, {nx}) ...")
+    vol, radii = make_straight_fibre_phantom(
+        nz=depth, ny=ny, nx=nx, voxel_um=voxel_um, domain_radius_um=domain_radius_um,
+        fvf=args.fvf, r_mean_um=r_mean_um, mu_fibre=args.mu_fibre, mu_matrix=args.mu_matrix,
+        iters=iters, seed=args.seed)
+    print(f"  {radii.shape[0]} fibres, mu in [{vol.min():.2e}, {vol.max():.2e}]")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -257,12 +252,10 @@ def main(argv=None):
     )
     from phantom_sim.forward import simulate_projections
     from phantom_sim.reconstruct import reconstruct
-    from phantom_sim.metrics import psnr, ssim, register, resolution_along_across
+    from phantom_sim.metrics import psnr, ssim, register, resolution_along_across, corr_with_gt
 
-    vol = voxelize_config(
-        configuration, radii, (ny, nx), voxel_um=voxel_um,
-        axis=0, mu_fibre=args.mu_fibre, mu_matrix=args.mu_matrix,
-    )
+    use_noise = bool(args.i0 and args.i0 > 0)
+    forward_desc = f"poisson_i0_{args.i0:g}" if use_noise else "clean_line_integrals"
     volt = torch.tensor(vol, device="cuda")
 
     detector_z = (sdd_mm * 1000.0) / voxel_um
@@ -288,7 +281,10 @@ def main(argv=None):
         pid_i, _ = make_plenoptic_projector(
             vol.shape, geom_i, sinogram_size=sinogram_size_1, super_sampling=args.super_sampling)
         A_i = XrayOperator(pid_i)
-        proj_i = simulate_projections(A_i, volt, i0=args.i0, seed=args.seed + i)
+        if use_noise:
+            proj_i = simulate_projections(A_i, volt, i0=args.i0, seed=args.seed + i)
+        else:
+            proj_i = A_i(volt).detach()
         geom_blocks.append(geom_i)
         proj_blocks.append(proj_i)
 
@@ -345,14 +341,13 @@ def main(argv=None):
                 "domain_radius_um": domain_radius_um,
                 "fvf": args.fvf,
                 "r_mean_um": r_mean_um,
-                "r_sigma_um": args.r_sigma_um,
-                "n_slices": n_slices,
-                "misalignment": args.misalignment,
+                "depth": depth,
                 "iters": iters,
                 "seed": args.seed,
             },
             "geometry": geometry_meta(),
             "reconstruction": {
+                "forward": forward_desc,
                 "i0": args.i0,
                 "n_iter": n_iter,
                 "lr": args.lr,
@@ -375,13 +370,15 @@ def main(argv=None):
             x_init=None, log_every=log_every, gt=vol, target_psnr=target_psnr,
             lower_clamp=0.0,
         )
+        c = corr_with_gt(recon, vol)
         p = psnr(recon, vol)
         s = ssim(recon, vol)
         recon_reg = register(recon, vol)
         res = resolution_along_across(recon_reg, fibre_axis=0)
-        entry = assemble_stage_entry(n, p, s, res, history, target_psnr)
+        entry = assemble_stage_entry(n, c, p, s, res, history, target_psnr)
         cold_entries.append(entry)
         save_stage("cold_joint", n, recon, entry)
+        print(f"  cold_joint N={n}: corr_with_gt={c:.4f} psnr={p:.2f} ssim={s:.4f}")
 
     # --- warm_sequential: chain x_init forward, track cumulative compute ---------------
     warm_entries = []
@@ -398,13 +395,15 @@ def main(argv=None):
         x = recon
         cumulative_iters += n_iter
         cumulative_time += history["time"][-1] if history["time"] else 0.0
+        c = corr_with_gt(recon, vol)
         p = psnr(recon, vol)
         s = ssim(recon, vol)
         recon_reg = register(recon, vol)
         res = resolution_along_across(recon_reg, fibre_axis=0)
-        entry = assemble_stage_entry(n, p, s, res, history, target_psnr)
+        entry = assemble_stage_entry(n, c, p, s, res, history, target_psnr)
         warm_entries.append(entry)
         save_stage("warm_sequential", n, recon, entry)
+        print(f"  warm_sequential N={n}: corr_with_gt={c:.4f} psnr={p:.2f} ssim={s:.4f}")
 
     meta = {
         "smoke": bool(args.smoke),
@@ -417,14 +416,13 @@ def main(argv=None):
             "domain_radius_um": domain_radius_um,
             "fvf": args.fvf,
             "r_mean_um": r_mean_um,
-            "r_sigma_um": args.r_sigma_um,
-            "n_slices": n_slices,
-            "misalignment": args.misalignment,
+            "depth": depth,
             "iters": iters,
             "seed": args.seed,
         },
         "geometry": geometry_meta(),
         "reconstruction": {
+            "forward": forward_desc,
             "i0": args.i0,
             "n_iter": n_iter,
             "lr": args.lr,
@@ -436,13 +434,12 @@ def main(argv=None):
     metrics = assemble_metrics(cold_entries, warm_entries, cumulative_iters, cumulative_time, meta)
     metrics_path = out_dir / "pleno_metrics.json"
     write_meta(metrics_path, metrics)
-    print(f"Saved {metrics_path}")
-    for n, e in enumerate(cold_entries, start=1):
-        print(f"cold_joint N={n}: psnr={e['psnr']:.2f} ssim={e['ssim']:.4f}")
-    for n, e in enumerate(warm_entries, start=1):
-        print(f"warm_sequential N={n}: psnr={e['psnr']:.2f} ssim={e['ssim']:.4f}")
-    print(f"warm_sequential cumulative_iters={cumulative_iters} "
-          f"cumulative_time={cumulative_time:.2f}s")
+    print(f"Saved {metrics_path}  (forward: {forward_desc})")
+    print("HEADLINE corr-with-GT vs N (1..4):")
+    print("  cold_joint:      " + "  ".join(f"{e['corr_with_gt']:.4f}" for e in cold_entries))
+    print("  warm_sequential: " + "  ".join(f"{e['corr_with_gt']:.4f}" for e in warm_entries))
+    print(f"  warm cumulative compute: {cumulative_iters} iters, {cumulative_time:.1f}s "
+          f"(vs {4 * n_iter} iters for four independent cold solves)")
 
 
 if __name__ == "__main__":
