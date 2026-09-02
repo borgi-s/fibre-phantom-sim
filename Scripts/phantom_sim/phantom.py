@@ -157,3 +157,45 @@ def upsample_config(cfg, depth):
     hi = np.minimum(lo + 1, zc - 1)
     w = (pos - lo)[:, None, None]
     return (1.0 - w) * cfg[lo] + w * cfg[hi]
+
+
+def chunk_gt(cfg_ctrl, radii, chunk_idx, n_chunks, chunk_depth, transverse_shape,
+             voxel_um, mu_fibre, mu_matrix, supersample=4):
+    """Voxelise one depth-chunk of a wandering bundle.
+
+    cfg_ctrl: (Zc, 2, N) packer control slices. The full bundle is
+    n_chunks*chunk_depth voxels deep along dim 0; this upsamples the control config to
+    that depth, slices out chunk `chunk_idx`, and voxelises it (anti-aliased discs, void
+    background). Returns (chunk_depth, ny, nx) float32. Torch-free.
+    """
+    total = n_chunks * chunk_depth
+    full = upsample_config(cfg_ctrl, total)
+    sl = full[chunk_idx * chunk_depth:(chunk_idx + 1) * chunk_depth]
+    return voxelize_config(sl, radii, transverse_shape, voxel_um=voxel_um, axis=0,
+                           mu_fibre=mu_fibre, mu_matrix=mu_matrix, supersample=supersample)
+
+
+def pair_misorientation(cfg_ctrl, radii, chunk_a, chunk_b, n_chunks, chunk_depth,
+                        transverse_shape, voxel_um, mu_fibre, mu_matrix, supersample=4):
+    """Cross-section correlation between two chunks' CENTRE slices (1.0 = identical).
+
+    The independent variable for the chunk-sequence study: how similar the prior chunk's
+    cross-section is to the new one's. Uses the centre slice (one voxel plane) of each
+    chunk, which is cheap and matches the calibration spike. Torch-free.
+    """
+    total = n_chunks * chunk_depth
+    full = upsample_config(cfg_ctrl, total)
+
+    def centre_slice(c):
+        idx = min(int((c + 0.5) * chunk_depth), total - 1)
+        one = voxelize_config(full[idx:idx + 1], radii, transverse_shape, voxel_um=voxel_um,
+                              axis=0, mu_fibre=mu_fibre, mu_matrix=mu_matrix,
+                              supersample=supersample)
+        return one[0].ravel().astype(np.float64)
+
+    a = centre_slice(chunk_a)
+    b = centre_slice(chunk_b)
+    a -= a.mean()
+    b -= b.mean()
+    d = np.linalg.norm(a) * np.linalg.norm(b)
+    return float((a @ b) / d) if d > 0 else float("nan")
