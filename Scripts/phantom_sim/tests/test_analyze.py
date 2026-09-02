@@ -13,6 +13,8 @@ from phantom_sim.analyze import (
     slice_montage,
     exp1_figure,
     exp2_figures,
+    exp2_corr_convergence,
+    stage_boundaries,
     volume_plotly_html,
 )
 
@@ -98,6 +100,62 @@ def test_exp2_figures_writes_multiple_pngs(tmp_path):
         assert fp.exists() and fp.stat().st_size > 0
 
 
+def _fake_corr_history(corrs, log_every=10):
+    """History shaped like reconstruct.new_history(), carrying a per-iteration corr trace."""
+    n = len(corrs)
+    return {
+        "iter": [i * log_every for i in range(n)],
+        "time": [float(i) * 0.5 for i in range(n)],
+        "data_loss": [1.0 / (i + 1) for i in range(n)],
+        "tv_loss": [0.1] * n,
+        "metric": [10.0 + i for i in range(n)],   # psnr, still logged
+        "corr": [float(c) for c in corrs],
+    }
+
+
+def _fake_pleno_metrics_corr():
+    """pleno_metrics.json with per-iteration corr traces + meta.reconstruction, as the
+    corr-thresholding driver writes. Warm starts higher than cold (warm-started)."""
+    def by_N(start):
+        out = []
+        for n in range(1, 5):
+            corrs = [min(start + 0.05 * k, 0.99) for k in range(5)]
+            out.append({
+                "N": n,
+                "corr_with_gt": corrs[-1],
+                "psnr": 12.0 + n,
+                "ssim": 0.6,
+                "resolution": {"along": 0.02, "across_mean": 0.04, "ratio": 0.5},
+                "iters_to_threshold": 20,
+                "time_to_threshold": 1.0,
+                "history": _fake_corr_history(corrs),
+            })
+        return out
+
+    return {
+        "cold_joint": {"by_N": by_N(0.70)},
+        "warm_sequential": {"by_N": by_N(0.80),
+                            "cumulative_iters": 200, "cumulative_time": 20.0},
+        "meta": {"voxel_um": 2.0, "target_psnr": 28.0,
+                 "reconstruction": {"n_iter": 50, "log_every": 10, "target_corr": 0.90}},
+    }
+
+
+def test_stage_boundaries_marks_zpos_insertions():
+    # stages 2,3,4 begin at 1x,2x,3x the per-stage iteration budget
+    assert stage_boundaries(50, n_stages=4) == [50, 100, 150]
+    assert stage_boundaries(50, n_stages=1) == []
+
+
+def test_exp2_corr_convergence_writes_png(tmp_path):
+    j = tmp_path / "pleno_metrics.json"
+    j.write_text(json.dumps(_fake_pleno_metrics_corr()), encoding="utf-8")
+    out = tmp_path / "exp2_corr_convergence.png"
+    ret = exp2_corr_convergence(str(j), str(out))
+    assert ret == str(out)
+    assert out.exists() and out.stat().st_size > 0
+
+
 def test_volume_plotly_html_writes_html(tmp_path):
     vol = np.zeros((24, 24, 24), np.float32)
     vol[:, 8:16, 8:16] = 1.0  # a bright bar so the isosurface has something to draw
@@ -105,3 +163,46 @@ def test_volume_plotly_html_writes_html(tmp_path):
     volume_plotly_html(vol, str(out))
     assert out.exists() and out.stat().st_size > 0
     assert "<html" in out.read_text(encoding="utf-8").lower()
+
+
+def test_exp3_warmcost_figure(tmp_path):
+    from phantom_sim.analyze import exp3_warmcost_vs_misorientation
+
+    metrics = {
+        "meta": {"C0": 0.96},
+        "anchor": {"chunk": 0, "iters_to_threshold": None},
+        "cold": [
+            {"chunk": 1, "iters_to_threshold": 60, "time_to_threshold": 600.0},
+            {"chunk": 2, "iters_to_threshold": 62, "time_to_threshold": 610.0},
+            {"chunk": 3, "iters_to_threshold": 61, "time_to_threshold": 605.0},
+            {"chunk": 4, "iters_to_threshold": 63, "time_to_threshold": 615.0},
+            {"chunk": 6, "iters_to_threshold": 64, "time_to_threshold": 620.0},
+        ],
+        "runs": {
+            "A": {
+                "warm": [
+                    {"chunk": 0},
+                    {"chunk": 1, "iters_to_threshold": 20, "time_to_threshold": 200.0},
+                    {"chunk": 2, "iters_to_threshold": 22, "time_to_threshold": 210.0},
+                    {"chunk": 3, "iters_to_threshold": 21, "time_to_threshold": 205.0},
+                ],
+                "pair_misorientation": [0.965, 0.965, 0.965],
+            },
+            "B": {
+                "warm": [
+                    {"chunk": 0},
+                    {"chunk": 2, "iters_to_threshold": 45, "time_to_threshold": 450.0},
+                    {"chunk": 4, "iters_to_threshold": 48, "time_to_threshold": 470.0},
+                    {"chunk": 6, "iters_to_threshold": 50, "time_to_threshold": 490.0},
+                ],
+                "pair_misorientation": [0.920, 0.920, 0.920],
+            },
+        },
+    }
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps(metrics), encoding="utf-8")
+    out = tmp_path / "exp3.png"
+    ret = exp3_warmcost_vs_misorientation(str(p), str(out))
+    import os
+
+    assert os.path.exists(ret) and os.path.getsize(ret) > 0

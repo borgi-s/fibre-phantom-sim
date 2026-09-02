@@ -11,6 +11,7 @@ Public API:
   - slice_montage(vol, out_png, fibre_axis) -> None       (three orthogonal mid-slices)
   - exp1_figure(metrics_json, out_png) -> None            (rotation vs beam bars)
   - exp2_figures(metrics_json, out_dir) -> list[str]      (fidelity/convergence/threshold)
+  - exp2_corr_convergence(metrics_json, out_png) -> str   (corr-vs-iter, warm vs cold, z-lines)
   - volume_plotly_html(vol, out_html, ...) -> None        (interactive 3D isosurface)
   - main(argv) -> None                                     (build every figure for a run)
 
@@ -230,6 +231,161 @@ def exp2_figures(metrics_json, out_dir, dpi=110):
 
 
 # ----------------------------------------------------------------------------------
+# Experiment 2: warm-start vs cold-joint convergence to a corr-with-GT threshold
+# ----------------------------------------------------------------------------------
+
+def stage_boundaries(n_iter, n_stages=4):
+    """Cumulative-iteration x-positions where a new z-position enters the warm chain.
+
+    The warm chain runs one solve per N in 1..n_stages, each of n_iter iterations, drawn
+    on one continuous axis; stages 2..n_stages therefore begin at 1x, 2x, ... the per-stage
+    budget. These are the "a new z-position was added here" marker lines. Empty for a
+    single-stage chain.
+    """
+    return [k * n_iter for k in range(1, n_stages)]
+
+
+def _sequential_chain(entries, xkey, thr_key, target_corr):
+    """Lay one arm's stages end to end on a single cumulative axis in `xkey` units.
+
+    Returns (xs, ys, seg_starts, crosses, total): one polyline over all stages (warm reads
+    as a mostly-rising chain with small dips where a new z-position enters; cold sawtooths,
+    dropping to ~0 at each independent restart), the x where each stage begins, the
+    (x, target_corr) threshold-crossing points, and the total compute the arm spent to reach
+    the 4-position result. `xkey` is "iter" or "time"; the per-stage span is iterations-run
+    (last+1) or seconds-elapsed (last) accordingly, so both arms' variable-length (early-
+    stopped) stages place honestly and the two totals are directly comparable.
+    """
+    xs, ys, seg_starts, crosses = [], [], [], []
+    off = 0.0
+    for e in entries:
+        h = e["history"]
+        loc = h.get(xkey) or []
+        cr = h.get("corr") or []
+        if not loc:
+            continue
+        seg_starts.append(off)
+        xs.extend(off + v for v in loc)
+        ys.extend(cr)
+        thr = e.get(thr_key)
+        if thr is not None and target_corr is not None:
+            crosses.append((off + thr, target_corr))
+        off += (loc[-1] + 1) if xkey == "iter" else loc[-1]
+    return xs, ys, seg_starts, crosses, off
+
+
+def exp2_corr_convergence(metrics_json, out_png, dpi=130):
+    """corr-with-GT vs compute for Experiment 2, warm-sequential vs cold-joint, as two
+    sequential chains laid end to end on one axis.
+
+    Reads pleno_metrics.json (schema in run_plenoptic_zpos.py). Warm inherits the previous
+    position's volume, so its chain stays high across all four stages with small bumps where
+    each new z-position enters; cold restarts every solve from scratch, so it sawtooths down
+    to ~0 and re-climbs each stage. The two chains END at different x, and that gap is the
+    total compute the warm chain saves to reach the same 4-position result. Two panels: x =
+    iterations (the fair count) and x = wall-clock seconds (the real time). Vertical marks:
+    warm segment starts along the top, cold along the bottom, plus a solid end line per arm;
+    dots/squares sit at each stage's threshold crossing. Returns the PNG path written.
+    """
+    m = _read_json(metrics_json)
+    recon = m.get("meta", {}).get("reconstruction", {})
+    cold = sorted(m["cold_joint"]["by_N"], key=lambda e: e["N"])
+    warm = sorted(m["warm_sequential"]["by_N"], key=lambda e: e["N"])
+    target_corr = recon.get("target_corr")
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5), sharey=True)
+    warm_col, cold_col = "#d95f0e", "#2c7fb8"
+    panels = [("iter", "iters_to_threshold", "iteration"),
+              ("time", "time_to_threshold", "wall-clock (s)")]
+
+    for ax, (xkey, thr_key, xlabel) in zip(axes, panels):
+        cx, cy, c_starts, c_cross, c_end = _sequential_chain(cold, xkey, thr_key, target_corr)
+        wx, wy, w_starts, w_cross, w_end = _sequential_chain(warm, xkey, thr_key, target_corr)
+        ax.plot(cx, cy, "--", color=cold_col, lw=1.4, label="cold joint (restart per N)")
+        ax.plot(wx, wy, "-", color=warm_col, lw=1.9, label="warm sequential (chained)")
+        if c_cross:
+            ax.plot([p[0] for p in c_cross], [p[1] for p in c_cross], "s", color=cold_col, ms=6)
+        if w_cross:
+            ax.plot([p[0] for p in w_cross], [p[1] for p in w_cross], "o", color=warm_col, ms=6)
+        if target_corr is not None:
+            ax.axhline(target_corr, color="k", ls="-.", lw=0.8,
+                       label="target corr %.2f" % target_corr)
+        ymin, ymax = ax.get_ylim()
+        for i, s in enumerate(w_starts):  # warm z-position insertions, along the top
+            ax.axvline(s, color=warm_col, ls=":", lw=0.7, alpha=0.5)
+            ax.text(s, ymax, " N=%d" % (i + 1), color=warm_col, fontsize=7, va="top", ha="left")
+        for i, s in enumerate(c_starts):  # cold independent restarts, along the bottom
+            ax.text(s, ymin, " N=%d" % (i + 1), color=cold_col, fontsize=7, va="bottom", ha="left")
+        ax.axvline(w_end, color=warm_col, lw=1.2)   # compute each arm needed to finish
+        ax.axvline(c_end, color=cold_col, lw=1.2)
+        ax.set_title("%s to the 4-position result: warm %.0f vs cold %.0f (save %.0f)"
+                     % (xlabel, w_end, c_end, c_end - w_end), fontsize=9)
+        ax.set_xlabel(xlabel)
+        ax.grid(alpha=0.3)
+
+    axes[0].set_ylabel("corr-with-GT (object crop)")
+    axes[0].legend(fontsize=8, loc="lower right")
+    fig.suptitle("Experiment 2: warm-start vs cold-joint, corr-with-GT vs compute", fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(str(out_png), dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return str(out_png)
+
+
+# ----------------------------------------------------------------------------------
+# Experiment 3: chunk-sequence warm-start cost vs fibre misorientation
+# ----------------------------------------------------------------------------------
+
+def exp3_warmcost_vs_misorientation(metrics_json, out_png, dpi=130):
+    """Warm iters/time to reach the anchor fidelity C0, versus prior->new dissimilarity.
+
+    Reads chunkseq_metrics.json (schema in run_plenoptic_chunkseq.py). For each ordering
+    (A adjacent, B every-second) plots each warm step's cost against 1 - pair_misorientation
+    (how different the previous chunk was), with the cold-from-scratch cost of the same target
+    chunk as the flat ceiling. The warm curve rising toward the cold ceiling as dissimilarity
+    grows is the headline result. Returns the PNG path written.
+    """
+    m = _read_json(metrics_json)
+    C0 = m["meta"]["C0"]
+    cold = {e["chunk"]: e for e in m["cold"]}
+    colours = {"A": "#2c7fb8", "B": "#d95f0e"}
+    steplbl = {"A": "adjacent (step 1)", "B": "every-second (step 2)"}
+
+    fig, (axi, axt) = plt.subplots(1, 2, figsize=(13, 5))
+    for name, run in m["runs"].items():
+        warm = run["warm"]
+        mis = run["pair_misorientation"]
+        xs, wi, wt, ci = [], [], [], []
+        for k in range(1, len(warm)):
+            e = warm[k]
+            xs.append(1.0 - mis[k - 1])
+            wi.append(np.nan if e["iters_to_threshold"] is None else e["iters_to_threshold"])
+            wt.append(np.nan if e["time_to_threshold"] is None else e["time_to_threshold"])
+            ce = cold.get(e["chunk"], {})
+            ci.append(np.nan if ce.get("iters_to_threshold") is None else ce["iters_to_threshold"])
+        lbl = steplbl.get(name, name)
+        axi.plot(xs, wi, "o-", color=colours.get(name, "#666666"), label="warm %s" % lbl)
+        axi.plot(xs, ci, "x--", color=colours.get(name, "#666666"), alpha=0.5,
+                 label="cold %s" % lbl)
+        axt.plot(xs, wt, "o-", color=colours.get(name, "#666666"), label="warm %s" % lbl)
+    axi.set_xlabel("prior->new dissimilarity  (1 - cross-section corr)")
+    axi.set_ylabel("iterations to reach anchor fidelity")
+    axi.set_title("Warm-start iters to C0 = %.3f vs misorientation" % C0)
+    axi.legend(fontsize=8)
+    axi.grid(alpha=0.3)
+    axt.set_xlabel("prior->new dissimilarity  (1 - cross-section corr)")
+    axt.set_ylabel("wall-clock to reach anchor fidelity (s)")
+    axt.set_title("Warm-start time to C0 vs misorientation")
+    axt.legend(fontsize=8)
+    axt.grid(alpha=0.3)
+    fig.suptitle("Experiment 3: warm-start compute saving vs fibre misorientation", fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(str(out_png), dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return str(out_png)
+
+
+# ----------------------------------------------------------------------------------
 # Interactive 3D view (mobile workflow)
 # ----------------------------------------------------------------------------------
 
@@ -305,6 +461,13 @@ def main(argv=None):
     pleno_json = results / "pleno_metrics.json"
     if pleno_json.exists():
         made.extend(exp2_figures(str(pleno_json), str(out_dir)))
+        made.append(exp2_corr_convergence(
+            str(pleno_json), str(out_dir / "exp2_corr_convergence.png")))
+
+    chunkseq_json = results / "chunkseq_metrics.json"
+    if chunkseq_json.exists():
+        made.append(exp3_warmcost_vs_misorientation(
+            str(chunkseq_json), str(out_dir / "exp3_warmcost_vs_misorientation.png")))
 
     if args.plotly_volume:
         vp = Path(args.plotly_volume)
