@@ -138,3 +138,22 @@ def make_straight_fibre_phantom(nz, ny, nx, voxel_um, domain_radius_um, fvf, r_m
                           mu_fibre=mu_fibre, mu_matrix=mu_matrix, supersample=supersample)
     vol = np.repeat(one, nz, axis=0)
     return np.ascontiguousarray(vol, dtype=np.float32), radii
+
+
+def upsample_config(cfg, depth):
+    """Linearly interpolate a control-slice configuration to `depth` slices.
+
+    cfg: (Zc, 2, N) fibre centres in um (index 0 = x, 1 = y) at Zc packer control
+    slices. Returns (depth, 2, N): the fibres' centres at every voxel slice of a
+    wandering bundle. Packing all `depth` slices in the packer is too slow; the wander
+    is smooth, so linear upsampling of a small control set is faithful. Torch-free.
+    """
+    cfg = np.asarray(cfg, dtype=np.float64)
+    zc = cfg.shape[0]
+    if depth == zc:
+        return cfg.copy()
+    pos = np.linspace(0.0, zc - 1, depth)
+    lo = np.floor(pos).astype(int)
+    hi = np.minimum(lo + 1, zc - 1)
+    w = (pos - lo)[:, None, None]
+    return (1.0 - w) * cfg[lo] + w * cfg[hi]
