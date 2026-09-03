@@ -1,0 +1,55 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 3 chunk-sequence plenoptic warm-start run
+# Full dedicated A100 (>=40GB VRAM), exclusive so nothing shares the card.
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp3_chunkseq.bsub   (from workspace)
+# Monitor with:  bjobs -l <JOBID> ; tail -f logs/exp3-<JOBID>.out
+# ==============================================================================
+#
+#BSUB -J exp3-chunkseq                      # Job name (visible in bjobs)
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU, no sharing (fixes the OOM)
+#BSUB -W 16:00                              # Walltime HH:MM (~8h at full scale: each 400-iter solve is ~1h; 16h is a safe cap)
+#BSUB -n 4                                  # CPU slots (host side: packing + voxelisation)
+#BSUB -R "rusage[mem=8GB]"                  # HOST RAM per slot (padded volumes live on CPU)
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp3-%J.out                   # stdout (%J = job id)
+#BSUB -e logs/exp3-%J.err                   # stderr
+#BSUB -N -u <your-email>                    # email when the job finishes
+# To FORCE the 80GB A100 for maximum headroom, add:  #BSUB -R "select[gpu80gb]"
+# (default: any free A100, all >=40GB).
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"
+CONDA_ENV="pleno_v100_min"                  # the env the smoke ran in (try_pleno also works)
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+# /zhome is over quota: keep every cache on node-local /tmp (per the 2026-09-01 handoff).
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments here. The torch in
+# pleno_v100_min predates PyTorch 2.1 and errors out ("Unrecognized CachingAllocator
+# option") the moment it touches CUDA. The memory audit found no leak, so it is not needed.
+
+# Activate conda (auto-detect base from PATH; override CONDA_BASE if not found).
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+# Single plenoptic position per chunk (the 32GB-safe footprint). Do NOT add
+# --positions 4 without an 80GB card.
+python -m phantom_sim.run_plenoptic_chunkseq --out phantom_sim_results/exp3_chunkseq
+
+echo "Done. Results in ${WORKDIR}/phantom_sim_results/exp3_chunkseq"

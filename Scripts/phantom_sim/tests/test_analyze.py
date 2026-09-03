@@ -165,44 +165,118 @@ def test_volume_plotly_html_writes_html(tmp_path):
     assert "<html" in out.read_text(encoding="utf-8").lower()
 
 
-def test_exp3_warmcost_figure(tmp_path):
-    from phantom_sim.analyze import exp3_warmcost_vs_misorientation
+def _cold_solve(chunk):
+    """A from-scratch chunk solve: climbs from ~0 to just past C0 over 4 log-points.
 
-    metrics = {
-        "meta": {"C0": 0.96},
-        "anchor": {"chunk": 0, "iters_to_threshold": None},
-        "cold": [
-            {"chunk": 1, "iters_to_threshold": 60, "time_to_threshold": 600.0},
-            {"chunk": 2, "iters_to_threshold": 62, "time_to_threshold": 610.0},
-            {"chunk": 3, "iters_to_threshold": 61, "time_to_threshold": 605.0},
-            {"chunk": 4, "iters_to_threshold": 63, "time_to_threshold": 615.0},
-            {"chunk": 6, "iters_to_threshold": 64, "time_to_threshold": 620.0},
-        ],
+    History span is 31 iterations (last iter 30, +1) and 3.0 s, the compute a from-scratch
+    solve spends; matches how _sequential_chain accounts a segment.
+    """
+    return {
+        "chunk": chunk,
+        "corr_with_gt": 0.951,
+        "iters_to_threshold": 30,
+        "time_to_threshold": 2.4,
+        "history": {
+            "iter": [0, 10, 20, 30],
+            "time": [0.0, 1.0, 2.0, 3.0],
+            "corr": [0.05, 0.60, 0.88, 0.951],
+        },
+    }
+
+
+def _warm_solve(chunk):
+    """A warm-started chunk solve: starts already near C0, crosses in 2 log-points.
+
+    History span is 11 iterations (last iter 10, +1) and 1.0 s, far less than a from-scratch
+    solve, so the warm arm's totals come in well below the cold arm's.
+    """
+    return {
+        "chunk": chunk,
+        "corr_with_gt": 0.952,
+        "iters_to_threshold": 10,
+        "time_to_threshold": 0.8,
+        "history": {
+            "iter": [0, 10],
+            "time": [0.0, 1.0],
+            "corr": [0.93, 0.952],
+        },
+    }
+
+
+def _fake_chunkseq_metrics():
+    """chunkseq_metrics.json shape (schema in run_plenoptic_chunkseq.py): anchor (chunk 0,
+    full solve) + cold solves for every target chunk + two warm orderings A (adjacent) and
+    B (every-second), each carrying the previous->new pair_misorientation. Warm solves are
+    cheap (11 iters), cold solves full (31 iters); chunk 0 in each warm arm IS the anchor.
+    """
+    return {
+        "meta": {"C0": 0.95, "orderings": {"A": [0, 1, 2, 3], "B": [0, 2, 4, 6]}},
+        "anchor": _cold_solve(0),
+        "cold": [_cold_solve(c) for c in (1, 2, 3, 4, 6)],
         "runs": {
             "A": {
-                "warm": [
-                    {"chunk": 0},
-                    {"chunk": 1, "iters_to_threshold": 20, "time_to_threshold": 200.0},
-                    {"chunk": 2, "iters_to_threshold": 22, "time_to_threshold": 210.0},
-                    {"chunk": 3, "iters_to_threshold": 21, "time_to_threshold": 205.0},
-                ],
-                "pair_misorientation": [0.965, 0.965, 0.965],
+                "warm": [_cold_solve(0), _warm_solve(1), _warm_solve(2), _warm_solve(3)],
+                "pair_misorientation": [0.965, 0.963, 0.957],
+                "cumulative_iters": 64, "cumulative_time": 6.0,
             },
             "B": {
-                "warm": [
-                    {"chunk": 0},
-                    {"chunk": 2, "iters_to_threshold": 45, "time_to_threshold": 450.0},
-                    {"chunk": 4, "iters_to_threshold": 48, "time_to_threshold": 470.0},
-                    {"chunk": 6, "iters_to_threshold": 50, "time_to_threshold": 490.0},
-                ],
-                "pair_misorientation": [0.920, 0.920, 0.920],
+                "warm": [_cold_solve(0), _warm_solve(2), _warm_solve(4), _warm_solve(6)],
+                "pair_misorientation": [0.920, 0.915, 0.902],
+                "cumulative_iters": 64, "cumulative_time": 6.0,
             },
         },
     }
-    p = tmp_path / "m.json"
-    p.write_text(json.dumps(metrics), encoding="utf-8")
-    out = tmp_path / "exp3.png"
-    ret = exp3_warmcost_vs_misorientation(str(p), str(out))
-    import os
 
+
+def test_exp3_numbers_totals_and_speedup(tmp_path):
+    from phantom_sim.analyze import exp3_numbers
+
+    p = tmp_path / "chunkseq_metrics.json"
+    p.write_text(json.dumps(_fake_chunkseq_metrics()), encoding="utf-8")
+    nums = exp3_numbers(str(p))
+
+    a = nums["orderings"]["A"]
+    # Anchor step is the shared seed: no similarity, no saving.
+    assert a["steps"][0]["similarity"] is None
+    assert a["steps"][0]["speedup"] == 1.0
+    # Every warm step is cheaper than the same chunk from scratch, and carries its neighbour sim.
+    assert a["steps"][1]["similarity"] == 0.965
+    for st in a["steps"][1:]:
+        assert st["warm_iters"] < st["cold_iters"]
+        assert st["speedup"] > 1.0
+    # Totals: warm 31 + 11 + 11 + 11 = 64 iters vs cold 31 * 4 = 124 iters (segment-span
+    # accounting identical to the sawtooth's end-lines).
+    assert a["total"]["warm_iters"] == 64
+    assert a["total"]["cold_iters"] == 124
+    assert abs(a["total"]["speedup"] - 124 / 64) < 1e-9
+    # Misorientation erosion is visible across orderings: B (more-different) has a lower
+    # mean neighbour similarity than A (adjacent).
+    assert nums["orderings"]["B"]["mean_similarity"] < a["mean_similarity"]
+
+
+def test_exp3_sawtooth_writes_png(tmp_path):
+    import os
+    from phantom_sim.analyze import exp3_sawtooth
+
+    p = tmp_path / "chunkseq_metrics.json"
+    p.write_text(json.dumps(_fake_chunkseq_metrics()), encoding="utf-8")
+    out = tmp_path / "exp3_sawtooth.png"
+    ret = exp3_sawtooth(str(p), str(out))
+    assert ret == str(out)
+    assert os.path.exists(ret) and os.path.getsize(ret) > 0
+    # The every-second ordering B renders through the same function.
+    out_b = tmp_path / "exp3_sawtooth_B.png"
+    ret_b = exp3_sawtooth(str(p), str(out_b), ordering="B")
+    assert os.path.exists(ret_b) and os.path.getsize(ret_b) > 0
+
+
+def test_exp3_table_writes_png(tmp_path):
+    import os
+    from phantom_sim.analyze import exp3_table
+
+    p = tmp_path / "chunkseq_metrics.json"
+    p.write_text(json.dumps(_fake_chunkseq_metrics()), encoding="utf-8")
+    out = tmp_path / "exp3_numbers_table.png"
+    ret = exp3_table(str(p), str(out))
+    assert ret == str(out)
     assert os.path.exists(ret) and os.path.getsize(ret) > 0

@@ -12,6 +12,9 @@ Public API:
   - exp1_figure(metrics_json, out_png) -> None            (rotation vs beam bars)
   - exp2_figures(metrics_json, out_dir) -> list[str]      (fidelity/convergence/threshold)
   - exp2_corr_convergence(metrics_json, out_png) -> str   (corr-vs-iter, warm vs cold, z-lines)
+  - exp3_numbers(metrics_json) -> dict                    (warm-vs-scratch cost numbers)
+  - exp3_sawtooth(metrics_json, out_png) -> str           (chunk-sequence sawtooth, warm vs scratch)
+  - exp3_table(metrics_json, out_png) -> str              (concrete cost/speed-up table PNG)
   - volume_plotly_html(vol, out_html, ...) -> None        (interactive 3D isosurface)
   - main(argv) -> None                                     (build every figure for a run)
 
@@ -336,50 +339,201 @@ def exp2_corr_convergence(metrics_json, out_png, dpi=130):
 # Experiment 3: chunk-sequence warm-start cost vs fibre misorientation
 # ----------------------------------------------------------------------------------
 
-def exp3_warmcost_vs_misorientation(metrics_json, out_png, dpi=130):
-    """Warm iters/time to reach the anchor fidelity C0, versus prior->new dissimilarity.
+def _segment_span(history, xkey):
+    """Compute one solve actually spent along `xkey`, matching _sequential_chain's accounting.
+
+    For iterations the span is last_iter + 1 (the count of iterations run); for wall-clock it
+    is the last elapsed second. Returns 0 for an empty history so a missing solve adds nothing.
+    """
+    loc = (history or {}).get(xkey) or []
+    if not loc:
+        return 0
+    return (loc[-1] + 1) if xkey == "iter" else loc[-1]
+
+
+def exp3_numbers(metrics_json):
+    """Concrete warm-vs-from-scratch cost numbers for the chunk-sequence study.
 
     Reads chunkseq_metrics.json (schema in run_plenoptic_chunkseq.py). For each ordering
-    (A adjacent, B every-second) plots each warm step's cost against 1 - pair_misorientation
-    (how different the previous chunk was), with the cold-from-scratch cost of the same target
-    chunk as the flat ceiling. The warm curve rising toward the cold ceiling as dissimilarity
-    grows is the headline result. Returns the PNG path written.
+    (A adjacent 0,1,2,3; B every-second 0,2,4,6) it pairs every warm chunk solve with the
+    from-scratch (cold) solve of the same target chunk and reports the compute each spent
+    (iterations run and wall-clock minutes) plus the warm speed-up. Chunk 0 is the shared
+    anchor, identical on both arms. Cost is the segment span actually run, so per-ordering
+    totals equal the sawtooth end-lines exactly. Returns a plain dict (no figure), which the
+    table renderer and any caption text can format.
     """
     m = _read_json(metrics_json)
     C0 = m["meta"]["C0"]
-    cold = {e["chunk"]: e for e in m["cold"]}
-    colours = {"A": "#2c7fb8", "B": "#d95f0e"}
-    steplbl = {"A": "adjacent (step 1)", "B": "every-second (step 2)"}
+    orderings = m["meta"]["orderings"]
+    anchor = m["anchor"]
+    cold_by_chunk = {e["chunk"]: e for e in m["cold"]}
+    cold_by_chunk[anchor["chunk"]] = anchor  # chunk 0 from-scratch IS the anchor solve
 
-    fig, (axi, axt) = plt.subplots(1, 2, figsize=(13, 5))
-    for name, run in m["runs"].items():
+    out = {"C0": C0, "orderings": {}}
+    for name, chunks in orderings.items():
+        run = m["runs"][name]
         warm = run["warm"]
-        mis = run["pair_misorientation"]
-        xs, wi, wt, ci = [], [], [], []
-        for k in range(1, len(warm)):
-            e = warm[k]
-            xs.append(1.0 - mis[k - 1])
-            wi.append(np.nan if e["iters_to_threshold"] is None else e["iters_to_threshold"])
-            wt.append(np.nan if e["time_to_threshold"] is None else e["time_to_threshold"])
-            ce = cold.get(e["chunk"], {})
-            ci.append(np.nan if ce.get("iters_to_threshold") is None else ce["iters_to_threshold"])
-        lbl = steplbl.get(name, name)
-        axi.plot(xs, wi, "o-", color=colours.get(name, "#666666"), label="warm %s" % lbl)
-        axi.plot(xs, ci, "x--", color=colours.get(name, "#666666"), alpha=0.5,
-                 label="cold %s" % lbl)
-        axt.plot(xs, wt, "o-", color=colours.get(name, "#666666"), label="warm %s" % lbl)
-    axi.set_xlabel("prior->new dissimilarity  (1 - cross-section corr)")
-    axi.set_ylabel("iterations to reach anchor fidelity")
-    axi.set_title("Warm-start iters to C0 = %.3f vs misorientation" % C0)
-    axi.legend(fontsize=8)
-    axi.grid(alpha=0.3)
-    axt.set_xlabel("prior->new dissimilarity  (1 - cross-section corr)")
-    axt.set_ylabel("wall-clock to reach anchor fidelity (s)")
-    axt.set_title("Warm-start time to C0 vs misorientation")
-    axt.legend(fontsize=8)
-    axt.grid(alpha=0.3)
-    fig.suptitle("Experiment 3: warm-start compute saving vs fibre misorientation", fontsize=12)
+        mis = run.get("pair_misorientation", [])
+        steps = []
+        wi_tot = wt_tot = ci_tot = ct_tot = 0
+        for k, w in enumerate(warm):
+            chunk = w["chunk"]
+            wi = _segment_span(w.get("history"), "iter")
+            wt = _segment_span(w.get("history"), "time")
+            cold_entry = cold_by_chunk.get(chunk, {})
+            ci = _segment_span(cold_entry.get("history"), "iter")
+            ct = _segment_span(cold_entry.get("history"), "time")
+            wi_tot += wi
+            wt_tot += wt
+            ci_tot += ci
+            ct_tot += ct
+            if k == 0:
+                label, sim, speed = "chunk %d (seed)" % chunk, None, 1.0
+            else:
+                label = "%d → %d" % (warm[k - 1]["chunk"], chunk)
+                sim = mis[k - 1] if k - 1 < len(mis) else None
+                speed = (float(ci) / wi) if wi else float("nan")
+            steps.append({
+                "label": label, "chunk": chunk, "similarity": sim,
+                "cold_iters": ci, "cold_min": ct / 60.0,
+                "warm_iters": wi, "warm_min": wt / 60.0, "speedup": speed,
+            })
+        valid_mis = [x for x in mis if x is not None]
+        out["orderings"][name] = {
+            "ordering": chunks,
+            "steps": steps,
+            "total": {
+                "cold_iters": ci_tot, "cold_min": ct_tot / 60.0,
+                "warm_iters": wi_tot, "warm_min": wt_tot / 60.0,
+                "speedup": (float(ci_tot) / wi_tot) if wi_tot else float("nan"),
+            },
+            "mean_similarity": (sum(valid_mis) / len(valid_mis)) if valid_mis else None,
+        }
+    return out
+
+
+def exp3_sawtooth(metrics_json, out_png, ordering="A", dpi=130):
+    """Corr-with-GT vs compute for the chunk sequence, warm-start vs from-scratch, as the
+    same end-to-end sawtooth as Experiment 2.
+
+    Reads chunkseq_metrics.json. The warm arm reconstructs a genuinely new volume at each
+    chunk by inheriting the previous chunk's recon, so it stays high with shallow dips where
+    each new chunk enters; the from-scratch arm restarts every solve, sawtoothing to ~0 and
+    re-climbing. The two arms end at different x, and that gap is the compute the warm chain
+    saves to reach the same set of chunk reconstructions. Two panels: x = iterations (the fair
+    count) and x = wall-clock seconds. Chunk 0 is the shared anchor. `ordering` selects the
+    chain (A adjacent, B every-second). Returns the PNG path written.
+    """
+    m = _read_json(metrics_json)
+    C0 = m["meta"]["C0"]
+    chunks = m["meta"]["orderings"][ordering]
+    anchor = m["anchor"]
+    cold_by_chunk = {e["chunk"]: e for e in m["cold"]}
+    cold_by_chunk[anchor["chunk"]] = anchor
+    warm_arm = m["runs"][ordering]["warm"]
+    cold_arm = [cold_by_chunk[c] for c in chunks]
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5), sharey=True)
+    warm_col, cold_col = "#d95f0e", "#2c7fb8"
+    panels = [("iter", "iters_to_threshold", "iteration"),
+              ("time", "time_to_threshold", "wall-clock (s)")]
+
+    for ax, (xkey, thr_key, xlabel) in zip(axes, panels):
+        cx, cy, c_starts, c_cross, c_end = _sequential_chain(cold_arm, xkey, thr_key, C0)
+        wx, wy, w_starts, w_cross, w_end = _sequential_chain(warm_arm, xkey, thr_key, C0)
+        ax.plot(cx, cy, "--", color=cold_col, lw=1.4, label="from scratch (restart per chunk)")
+        ax.plot(wx, wy, "-", color=warm_col, lw=1.9, label="warm start (chained)")
+        if c_cross:
+            ax.plot([p[0] for p in c_cross], [p[1] for p in c_cross], "s", color=cold_col, ms=6)
+        if w_cross:
+            ax.plot([p[0] for p in w_cross], [p[1] for p in w_cross], "o", color=warm_col, ms=6)
+        ax.axhline(C0, color="k", ls="-.", lw=0.8, label="target quality %.3f" % C0)
+        ymin, ymax = ax.get_ylim()
+        for i, s in enumerate(w_starts):  # warm chunk insertions, along the top
+            ax.axvline(s, color=warm_col, ls=":", lw=0.7, alpha=0.5)
+            ax.text(s, ymax, " c%d" % chunks[i], color=warm_col, fontsize=7, va="top", ha="left")
+        for i, s in enumerate(c_starts):  # from-scratch restarts, along the bottom
+            ax.text(s, ymin, " c%d" % chunks[i], color=cold_col, fontsize=7, va="bottom",
+                    ha="left")
+        ax.axvline(w_end, color=warm_col, lw=1.2)
+        ax.axvline(c_end, color=cold_col, lw=1.2)
+        ax.set_title("%s for %d chunks: warm %.0f vs scratch %.0f (save %.0f)"
+                     % (xlabel, len(chunks), w_end, c_end, c_end - w_end), fontsize=9)
+        ax.set_xlabel(xlabel)
+        ax.grid(alpha=0.3)
+
+    axes[0].set_ylabel("corr-with-GT (object crop)")
+    axes[0].legend(fontsize=8, loc="lower right")
+    fig.suptitle("Experiment 3: warm-start across a wandering bundle (ordering %s), "
+                 "corr-with-GT vs compute" % ordering, fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(str(out_png), dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return str(out_png)
+
+
+def exp3_table(metrics_json, out_png, dpi=130):
+    """Render the concrete warm-vs-from-scratch numbers as a two-block table PNG.
+
+    Top block: per-chunk cost for ordering A (adjacent) with the from-scratch cost of the same
+    chunk and the warm speed-up, ending in an all-chunks total. Bottom block: the two orderings
+    compared, so the misorientation nuance reads at a glance (more-different neighbours save
+    slightly less). Numbers come from exp3_numbers, so the totals match the sawtooth. Returns
+    the PNG path written.
+    """
+    nums = exp3_numbers(metrics_json)
+    A = nums["orderings"]["A"]
+
+    def fmt_sim(s):
+        return "-" if s is None else "%.3f" % s
+
+    def fmt_im(it, mn):
+        return "%d  (%.1f)" % (round(it), mn)
+
+    def fmt_x(s):
+        return "%.1fx" % s
+
+    col = ["Step", "New-vol\nsimilarity", "From scratch\niters (min)",
+           "Warm start\niters (min)", "Speed-up"]
+    rows = [[st["label"], fmt_sim(st["similarity"]),
+             fmt_im(st["cold_iters"], st["cold_min"]),
+             fmt_im(st["warm_iters"], st["warm_min"]), fmt_x(st["speedup"])]
+            for st in A["steps"]]
+    tot = A["total"]
+    rows.append(["TOTAL (%d chunks)" % len(A["ordering"]), "-",
+                 fmt_im(tot["cold_iters"], tot["cold_min"]),
+                 fmt_im(tot["warm_iters"], tot["warm_min"]), fmt_x(tot["speedup"])])
+
+    pretty = {"A": "A: adjacent (0,1,2,3)", "B": "B: every-second (0,2,4,6)"}
+    col2 = ["Chain", "Mean new-vol\nsimilarity", "Warm total\niters (min)", "Speed-up\nvs scratch"]
+    rows2 = []
+    for name in ("A", "B"):
+        o = nums["orderings"][name]
+        t = o["total"]
+        rows2.append([pretty.get(name, name),
+                      "%.3f" % o["mean_similarity"] if o["mean_similarity"] is not None else "-",
+                      fmt_im(t["warm_iters"], t["warm_min"]), fmt_x(t["speedup"])])
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(11, 5),
+        gridspec_kw={"height_ratios": [len(rows) + 1, len(rows2) + 1]})
+    for ax in (ax1, ax2):
+        ax.axis("off")
+
+    t1 = ax1.table(cellText=rows, colLabels=col, loc="center", cellLoc="center")
+    t1.auto_set_font_size(False)
+    t1.set_fontsize(9)
+    t1.scale(1, 1.6)
+    ax1.set_title("Warm-start vs from-scratch: reconstructing a wandering bundle chunk by chunk",
+                  fontsize=11, pad=12)
+
+    t2 = ax2.table(cellText=rows2, colLabels=col2, loc="center", cellLoc="center")
+    t2.auto_set_font_size(False)
+    t2.set_fontsize(9)
+    t2.scale(1, 1.6)
+    ax2.set_title("More-different neighbours save slightly less", fontsize=10, pad=8)
+
+    fig.tight_layout()
     fig.savefig(str(out_png), dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     return str(out_png)
@@ -466,8 +620,10 @@ def main(argv=None):
 
     chunkseq_json = results / "chunkseq_metrics.json"
     if chunkseq_json.exists():
-        made.append(exp3_warmcost_vs_misorientation(
-            str(chunkseq_json), str(out_dir / "exp3_warmcost_vs_misorientation.png")))
+        for od in ("A", "B"):
+            made.append(exp3_sawtooth(
+                str(chunkseq_json), str(out_dir / ("exp3_sawtooth_%s.png" % od)), ordering=od))
+        made.append(exp3_table(str(chunkseq_json), str(out_dir / "exp3_numbers_table.png")))
 
     if args.plotly_volume:
         vp = Path(args.plotly_volume)

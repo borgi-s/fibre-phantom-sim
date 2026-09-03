@@ -93,6 +93,17 @@ def make_ct_projector(vol_recon_size, vectors, sinogram_size, super_sampling=2):
     return astra.create_projector("cuda3d", proj_geom, vol_geom, opts), vol_geom
 
 
+def delete_projector(projector_id):
+    """Free an ASTRA cuda3d projector so the GPU can reclaim its workspace.
+
+    Experiment 2 runs 8 solves and builds a fresh projector per stage; without freeing the
+    old ones (and the concatenated projection tensors) the run accumulates dead allocations
+    and OOMs on a 32 GB V100. Call between stages, paired with torch.cuda.empty_cache().
+    """
+    import astra
+    astra.projector3d.delete(projector_id)
+
+
 class XrayOperator:
     def __init__(self, projector_id):
         import astra

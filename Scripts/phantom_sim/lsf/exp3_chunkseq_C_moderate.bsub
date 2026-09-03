@@ -1,0 +1,60 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 3 run C: chunk-sequence warm-start, MODERATE misalignment
+# Full dedicated A100 (>=40GB VRAM), exclusive so nothing shares the card.
+# Same protocol as exp3 (anchor + cold + warm A adjacent + warm B every-second); the only
+# change is a more misoriented wandering bundle (--misalignment moderate). Plots in-job.
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp3_chunkseq_C_moderate.bsub   (from workspace)
+# Monitor with:  bjobs -l <JOBID> ; tail -f logs/exp3c-<JOBID>.out
+# PREREQ: scp the UPDATED phantom_sim/analyze.py up first, or the in-job plot uses the old one.
+# ==============================================================================
+#
+#BSUB -J exp3c-moderate                     # Job name (visible in bjobs)
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU, no sharing (fixes the OOM)
+#BSUB -W 16:00                              # Walltime HH:MM (~8h at full scale; 16h safe cap)
+#BSUB -n 4                                  # CPU slots (host side: packing + voxelisation)
+#BSUB -R "rusage[mem=8GB]"                  # HOST RAM per slot (padded volumes live on CPU)
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp3c-%J.out                  # stdout (%J = job id)
+#BSUB -e logs/exp3c-%J.err                  # stderr
+#BSUB -N -u <your-email>                    # email when the job finishes
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"
+CONDA_ENV="pleno_v100_min"                  # the env exp3 ran in (try_pleno also works)
+OUTDIR="phantom_sim_results/exp3_chunkseq_moderate"
+MISALIGN="moderate"
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+# /zhome is over quota: keep every cache on node-local /tmp.
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments here. The torch in
+# pleno_v100_min predates PyTorch 2.1 and errors out the moment it touches CUDA.
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+# --- the run: full exp3 protocol on a MODERATE-misalignment bundle, single position ---
+python -m phantom_sim.run_plenoptic_chunkseq --out "${OUTDIR}" --misalignment "${MISALIGN}"
+
+# --- plot in-job (non-fatal: a plotting hiccup must never waste the solve) ---
+python -c "import matplotlib" || pip install --quiet matplotlib || true
+python -m phantom_sim.analyze --results "${OUTDIR}" \
+    || echo "PLOT STEP FAILED -- build the figures locally after scp instead."
+
+echo "Done. Results in ${WORKDIR}/${OUTDIR}"
