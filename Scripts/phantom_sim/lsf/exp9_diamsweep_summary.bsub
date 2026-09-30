@@ -1,0 +1,32 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 9 summary: cross-rung diameter-recovery figures (CPU only).
+# Waits until every element of the exp9-diam array has ENDED (done or failed), then builds
+# phantom_sim_results/exp9_diamsweep/figures/{diam_recovery.png, diam_bias.png, diam_sweep_table.*}.
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp9_diamsweep_summary.bsub   (right after the array)
+# ==============================================================================
+#
+#BSUB -J exp9-diam-summary
+#BSUB -q hpc
+#BSUB -w "ended(exp9-diam)"
+#BSUB -W 0:30
+#BSUB -n 1
+#BSUB -R "rusage[mem=4GB]"
+#BSUB -o logs/exp9-diam-summary-%J.out
+#BSUB -e logs/exp9-diam-summary-%J.err
+#BSUB -N -u <your-email>
+
+set -euo pipefail
+
+WORKDIR="/path/to/workspace"
+CONDA_ENV="pleno_v100_min"
+
+cd "${WORKDIR}"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${MPLCONFIGDIR}"
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+python -m phantom_sim.diam_sweep_summary --parent phantom_sim_results/exp9_diamsweep

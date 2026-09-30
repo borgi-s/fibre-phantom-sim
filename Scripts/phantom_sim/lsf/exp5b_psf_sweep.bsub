@@ -1,0 +1,74 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 5b point-spread SWEEP: longitudinal resolution vs
+# array half-angle. One point-sphere reconstruction
+# per half-angle, so walltime scales with the number of angles (12 by default).
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp5b_psf_sweep.bsub   (from workspace)
+# Monitor with:  bjobs -l <JOBID> ; tail -f logs/exp5b-<JOBID>.out
+# Smoke first:   python -m phantom_sim.run_plenoptic_psf_sweep --smoke --out /tmp/psf_sweep_smoke
+# ==============================================================================
+#
+#BSUB -J exp5b-psfsweep                     # Job name (visible in bjobs)
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU, no sharing
+#BSUB -W 12:00                              # Walltime HH:MM (one recon per angle; pad generously)
+#BSUB -n 4                                  # CPU slots
+#BSUB -R "rusage[mem=8GB]"                  # HOST RAM per slot
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp5b-%J.out                  # stdout (%J = job id)
+#BSUB -e logs/exp5b-%J.err                  # stderr
+#BSUB -N -u <your-email>                    # email when the job finishes
+# To force the 80GB A100 for headroom, add:  #BSUB -R "select[gpu80gb]"
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"  # holds phantom_sim/ + phantom_sim_results/
+CONDA_ENV="pleno_v100_min"                  # the env exp3/exp4/exp5/exp6 ran in (astra + torch)
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+# /zhome is over quota: keep caches on node-local /tmp.
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments; the pinned torch predates
+# PyTorch 2.1 and errors out ("Unrecognized CachingAllocator option") the moment it touches CUDA.
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+# Sweep the requested half-angles (5..45 deg). The current-array 9.66 deg point is injected
+# automatically as a within-run control that must reproduce the theme-5 anchor (~24 um / 5 um);
+# pass --no-include-current to drop it. Phantom/voxel/iters/TV match run_plenoptic_psf, so the
+# 9.66 deg point is directly comparable to exp5. Each angle opens the SOURCE array to
+# SOD*tan(theta) and takes the detector span from magnification, det = SDD*tan(theta)-source;
+# both spans printed per angle are the hardware cost of that aperture. Do NOT scale the detector
+# span alone: the sub-aperture tiles then miss the sample's shadow and the run silently collapses
+# to its central view (that was the 2026-09-21 failure, every angle returning identical metrics).
+python -m phantom_sim.run_plenoptic_psf_sweep \
+    --out phantom_sim_results/exp5b_psf_sweep \
+    --half-angles 5 7 12 15 17 21 25 30 35 40 45
+
+# NOTE on the wide end: the probe is a radius-2-voxel sphere at voxel 2 um, so the measurement
+# floor is ~the sphere/voxel scale. Past ~35 deg the predicted z-FWHM approaches that floor, so
+# z-FWHM may flatten there rather than keep falling. To resolve the wide end cleanly, rerun the
+# top angles with a finer probe, e.g.:
+#   python -m phantom_sim.run_plenoptic_psf_sweep \
+#       --out phantom_sim_results/exp5b_psf_sweep_fine \
+#       --half-angles 30 35 40 45 --voxel-um 1.0 --radius-vox 2 --no-include-current
+
+# Build the sweep figure in-job (non-fatal; rebuild locally with analyze --results ...).
+python -m phantom_sim.analyze --results phantom_sim_results/exp5b_psf_sweep || \
+    echo "PLOT STEP FAILED (rebuild locally with analyze --results ...)"
+
+echo "Done. Results in ${WORKDIR}/phantom_sim_results/exp5b_psf_sweep"

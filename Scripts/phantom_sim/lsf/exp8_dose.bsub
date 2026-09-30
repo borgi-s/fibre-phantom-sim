@@ -1,0 +1,86 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 8: REAL-DATA dose-reduction study on the 260703 glass-fibre
+# plenoptic scan (exposure headroom for a real-time-feasibility estimate).
+#
+# The 260703 detector is photon-counting (ADVACAM), so raw frames are integer photon counts.
+# A shorter exposure is simulated EXACTLY by Poisson (binomial) thinning of the raw sample
+# counts: each detected photon is kept with probability f (the dose fraction). f=1 returns the
+# measured data untouched, so the f=1 reconstruction is the reference the lower-dose recons are
+# scored against (correlation over the fibre region). No free noise parameter is assumed.
+#
+# Single capture only (position 0 = Zpos1), reconstructed with the delivered pipeline settings
+# (tvz=5e3, ADAM lr=2e-4 + ReduceLROnPlateau, 200 iters, non-negativity clamp), minus the
+# multibang term (never fires before iter 500) and the sub-pixel oversampling refinement; both
+# are identical across every dose level, so the degradation curve is unaffected.
+#
+# Dose ladder f = 1.0, 0.5, 0.25, 0.10, 0.05, 0.02 ; three seeds per f<1. f=1 is run once.
+# Read off the lowest f whose fibre correlation is still within ~1% of the f=1 value:
+#   Z% = f*100 , exposure T = 60 s * f , reduction N = 1/f.
+# ==============================================================================
+# VALIDATE FIRST (fast, ~one short recon) before the full sweep:
+#   bsub -q gpua100 -gpu "num=1:mode=exclusive_process" -W 0:30 -n 4 \
+#        -R "rusage[mem=12GB]" -R "span[hosts=1]" -o logs/exp8-smoke-%J.out \
+#        "cd /path/to/workspace && \
+#         source \$(dirname \$(dirname \$(command -v conda)))/etc/profile.d/conda.sh && \
+#         conda activate pleno_v100_min && python -m phantom_sim.run_plenoptic_dose --smoke"
+# Then submit the full sweep with:
+#   bsub < phantom_sim/lsf/exp8_dose.bsub        (from the workspace)
+# Monitor with:  bjobs -l <JOBID> ; tail -f logs/exp8-dose-<JOBID>.out
+# ==============================================================================
+#
+#BSUB -J exp8-dose                          # Job name (visible in bjobs)
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU, no sharing
+#BSUB -W 24:00                              # 16 recons of a 650x650x800 volume; see estimate below
+#BSUB -n 4                                  # CPU slots (host: frame loading + flat-fielding + thinning)
+#BSUB -R "rusage[mem=12GB]"                 # HOST RAM per slot
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp8-dose-%J.out              # stdout (%J = job id)
+#BSUB -e logs/exp8-dose-%J.err              # stderr
+#BSUB -N -u <your-email>                    # email when the job finishes
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"  # holds phantom_sim/
+CONDA_ENV="pleno_v100_min"  # proven recon env (astra + torch); the driver needs no OpenCV. try_pleno also works.
+DATA_ROOT="/path/to/raw_data"
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+# /zhome is over quota: keep caches on node-local /tmp.
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments; the pinned torch predates
+# PyTorch 2.1 and errors out the moment it touches CUDA.
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+OUT=phantom_sim_results/exp8_dose
+
+# WALLTIME ESTIMATE: single position (no 4-plane joint, no 356 oversample) on the 650x650x800
+# volume is far lighter than the delivered full recon (~12.7 GB, ~30 s/iter). Expect roughly
+# 10-20 min per 200-iter recon -> ~3-6 h for the 16 recons (f=1 once + 5 doses x 3 seeds).
+# 24:00 is a safe ceiling. dose_metrics.json is rewritten after EVERY recon, so if the job is
+# killed you keep all finished recons and can resume by narrowing --doses / --seeds.
+python -m phantom_sim.run_plenoptic_dose \
+    --data-root "${DATA_ROOT}" \
+    --out-dir "${OUT}" \
+    --doses "1.0,0.5,0.25,0.10,0.05,0.02" \
+    --seeds "0,1,2" \
+    --n-iter 200
+
+echo "Done. Results in ${WORKDIR}/${OUT} (dose_f*.pt recons + dose_metrics.json)."
+echo "Next (laptop): pull ${OUT} back; plot fibre-corr vs dose, read off the lowest acceptable f,"
+echo "then report Z% = f*100, T = 60 s * f, N = 1/f."

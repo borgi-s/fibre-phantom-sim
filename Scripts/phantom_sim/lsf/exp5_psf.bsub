@@ -1,0 +1,57 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 5 point-spread: longitudinal (z) resolution + MTF
+# Full dedicated A100, exclusive. A single reconstruction of a point-like sphere, so this
+# is short compared with the fibre-bundle runs.
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp5_psf.bsub   (from workspace)
+# Monitor with:  bjobs -l <JOBID> ; tail -f logs/exp5-<JOBID>.out
+# Smoke first:   python -m phantom_sim.run_plenoptic_psf --smoke --out /tmp/psf_smoke
+# ==============================================================================
+#
+#BSUB -J exp5-psf                           # Job name (visible in bjobs)
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU, no sharing
+#BSUB -W 04:00                              # Walltime HH:MM (one recon; short)
+#BSUB -n 4                                  # CPU slots
+#BSUB -R "rusage[mem=8GB]"                  # HOST RAM per slot
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp5-%J.out                   # stdout (%J = job id)
+#BSUB -e logs/exp5-%J.err                   # stderr
+#BSUB -N -u <your-email>                    # email when the job finishes
+# To force the 80GB A100 for headroom, add:  #BSUB -R "select[gpu80gb]"
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"                # dir holding phantom_sim/ (the Scripts contents)
+CONDA_ENV="pleno_v100_min"                  # the env exp3 ran in (try_pleno also works)
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments; the pinned torch predates
+# PyTorch 2.1 and errors out the moment it touches CUDA.
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+# Point-spread with the method's actual TV-along-z prior (the real z resolution). To split the
+# geometry-limited part from the prior-limited part, run a second time with --tv-weight 0.
+python -m phantom_sim.run_plenoptic_psf --out phantom_sim_results/exp5_psf
+
+# Build the PSF/MTF figure in-job (non-fatal).
+python -m phantom_sim.analyze --results phantom_sim_results/exp5_psf || \
+    echo "PLOT STEP FAILED (rebuild locally with analyze --results ...)"
+
+echo "Done. Results in ${WORKDIR}/phantom_sim_results/exp5_psf"

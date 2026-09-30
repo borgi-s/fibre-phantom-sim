@@ -1,0 +1,57 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 5c: point-spread and step-edge (fibre end) along z
+# One dedicated A100. Five short single-capture reconstructions (256^3 + padding):
+#   point (TV 0.5, TV 0), fibre end r = 6 um (TV 0.5, TV 0), broad end r = 50 um (TV 0.5).
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp5c_point_edge.bsub   (from workspace)
+# Monitor with:  bjobs -l <JOBID> ; tail -f logs/exp5c-<JOBID>.out
+# ==============================================================================
+#
+#BSUB -J exp5c-point-edge
+#BSUB -q gpua100
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -W 03:00
+#BSUB -n 4
+#BSUB -R "rusage[mem=8GB]"
+#BSUB -R "span[hosts=1]"
+#BSUB -o logs/exp5c-%J.out
+#BSUB -e logs/exp5c-%J.err
+#BSUB -N -u <your-email>
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"                # dir holding phantom_sim/ (the Scripts contents)
+CONDA_ENV="pleno_v100_min"
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+M="python -u -m phantom_sim.run_plenoptic_psf_edge"
+R=phantom_sim_results
+
+# Smoke both objects first (seconds); set -e aborts the job if either fails.
+$M --object point --smoke --out /tmp/${USER}_pe_smoke_point
+$M --object fibre_end --smoke --out /tmp/${USER}_pe_smoke_end
+
+$M --object point --out $R/exp5c_point
+$M --object point --tv-weight 0 --out $R/exp5c_point_zeroTV
+$M --object fibre_end --edge-radius-vox 3 --out $R/exp5c_fibre_end
+$M --object fibre_end --edge-radius-vox 3 --tv-weight 0 --out $R/exp5c_fibre_end_zeroTV
+$M --object fibre_end --edge-radius-vox 25 --out $R/exp5c_wide_end
+
+echo "Done. Results in ${WORKDIR}/$R/exp5c_*"

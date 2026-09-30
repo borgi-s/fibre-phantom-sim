@@ -1,0 +1,73 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 9: fibre-DIAMETER sweep (plenoptic resolution argument).
+#
+# One array element per mean fibre diameter: 20, 18, 16, 14, 12, 10 um (N(D, 0.10 D), clipped
+# +/- 2 sigma). Bundle matched to the real 260703 sample: fibre fraction 0.60 of the rope (CT
+# interior Otsu 0.606), rope 0.9 mm across (radius 450 um) in a 512x512x256 frame of 2 um voxels
+# (1.02 mm wide, 512 um deep). Small UNIFORM misalignment at the exp7 a08 level: independent momentum
+# waypoint wander, step 0.85 um per 15 um waypoint (~8 deg p90), no calm/wavy split.
+#
+# Each element: (1) build phantom + single-position plenoptic recon on the GPU
+#               (run_plenoptic_diamsweep -> recon.npy, gt_vol_u8.npy, fibre_gt.npz, metrics.json),
+#               (2) in a SEPARATE torch-free process run the M1-M4 diameter methods on the recon and
+#               on the ideal GT, reproducing the 2026-09-28 figure set (diam_analysis -> diam/).
+# Then submit exp9_diamsweep_summary.bsub (waits for this array) for the cross-rung figure.
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp9_diamsweep.bsub   (from workspace)
+# ==============================================================================
+#
+#BSUB -J exp9-diam[1-6]                     # Job array: one element per diameter
+#BSUB -q gpua100                            # A100 GPU queue (512^2 frame recon)
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU
+#BSUB -W 12:00                              # phantom (~0.5 h) + recon (~4 h est.) + M1-M4 x2 (~1-2 h)
+#BSUB -n 4                                  # CPU slots (re-pack, voxelise, M1 process pool)
+#BSUB -R "rusage[mem=12GB]"                 # HOST RAM per slot
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp9-diam-%J-%I.out           # stdout (per element)
+#BSUB -e logs/exp9-diam-%J-%I.err           # stderr (per element)
+#BSUB -N -u <your-email>                    # email on finish
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"
+CONDA_ENV="pleno_v100_min"
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments (pinned torch predates PyTorch 2.1).
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+DIAMS=(20 18 16 14 12 10)
+D="${DIAMS[$((LSB_JOBINDEX - 1))]}"
+PARENT=phantom_sim_results/exp9_diamsweep
+OUT="${PARENT}/D${D}"
+
+echo "Node: $(hostname)  element ${LSB_JOBINDEX} -> D=${D} um"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+if [ ! -f "${OUT}/recon.npy" ]; then
+    python -m phantom_sim.run_plenoptic_diamsweep \
+        --out "${OUT}" --diam-mean-um "${D}" --diam-cv 0.10 --diam-clip-sigma 2 \
+        --fvf 0.60 --domain-radius-um 450 --nx 512 --ny 512 --nz 256 \
+        --step 0.85 --waypoint-spacing-um 15 --persistence 0.74 --revert 0.14 --overlap-tol-um 0.05 \
+        --wave-seed 0 --seed 0 --diam-seed 3
+else
+    echo "recon.npy exists for D=${D}; skipping to the diameter analysis"
+fi
+
+# Separate process, no torch: scipy.optimize is safe (DTU_HPC_Guide B8.1).
+python -m phantom_sim.diam_analysis --run "${OUT}" --n-workers 4
+
+echo "Done D=${D}. Results in ${WORKDIR}/${OUT} (recon.npy, gt_vol_u8.npy, fibre_gt.npz, metrics.json, diam/)."

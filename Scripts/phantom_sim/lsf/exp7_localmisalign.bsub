@@ -1,0 +1,90 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 7: localized misalignment as a QC signal
+# (follow-up to exp4; the defect-localization demonstrator)
+#
+# exp4 tilts the WHOLE bundle uniformly. exp7 makes PART of an otherwise aligned
+# bundle misaligned and asks whether the reconstruction degrades LOCALLY, so the
+# defect can be spatially localized from the reconstruction alone (no ground truth).
+#
+# The misalignment is modelled as realistic fibre WAVINESS (not a rigid tilt): the
+# cross-section is split smoothly across x into a calm half (small natural waviness,
+# alpha_good = 3.5 deg, mostly straight) and a wavy half (large waviness up to
+# alpha_bad, mostly wavy). The waviness is coherent (all fibres share one non-sinusoidal
+# undulation), so neighbours move together and stay NON-OVERLAPPING; the driver asserts
+# this before reconstructing. Each run saves the reconstruction + a ground-truth
+# wavy-half mask; the structure-tensor orientation QC map (ground-truth-free) is built
+# on the laptop after pull-back and scored against the mask.
+#
+# alpha_bad = peak waviness angle of the wavy half. Ladder set from the measured baseline
+# bandwidth (exp4/exp6: array max ray half-angle 9.66 deg, 10% reconstruction-onset 17.8 deg):
+#   ctrl : alpha_bad = alpha_good = 3.5 deg (defect-free control) -> map must stay flat
+#   a08  : wavy half WITHIN the 9.66 deg aperture (below onset)   -> should still reconstruct
+#   a18  : wavy half AT the measured 17.8 deg onset               -> QC map should just light up
+#   a30  : wavy half well past onset                              -> main demonstrator
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp7_localmisalign.bsub   (from workspace)
+# Monitor with:  bjobs -l <JOBID> ; tail -f logs/exp7-<JOBID>.out
+# Smoke first:   python -m phantom_sim.run_plenoptic_local --smoke --out /tmp/local_smoke
+# ==============================================================================
+#
+#BSUB -J exp7-wavy                          # Job name (visible in bjobs)
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU, no sharing
+#BSUB -W 4:00                               # 4 recons x ~7 min ~= 30 min + packing; padded
+#BSUB -n 4                                  # CPU slots (host side: packing + voxelisation)
+#BSUB -R "rusage[mem=8GB]"                  # HOST RAM per slot (exp4 used 5.8/32 GB)
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp7-%J.out                   # stdout (%J = job id)
+#BSUB -e logs/exp7-%J.err                   # stderr
+#BSUB -N -u <your-email>                    # email when the job finishes
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"  # holds phantom_sim/ + phantom_sim_results/
+CONDA_ENV="pleno_v100_min"                  # the env exp3/exp4/exp5/exp6 ran in (confirm it matches)
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+# /zhome is over quota: keep caches on node-local /tmp.
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments; the pinned torch predates
+# PyTorch 2.1 and errors out the moment it touches CUDA.
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+PARENT=phantom_sim_results/exp7_wavy
+WAVE_SEED=0   # shared across the ladder: u(z)/g(z) identical, only alpha_bad (amplitude+duty) changes
+
+# The waviness is a bounded oscillation about the pultrusion axis (amplitude a few um at 30 deg),
+# so it stays well inside the nx=384 frame; the calm/wavy transition auto-widens if a config would
+# add NEW interpenetration beyond --overlap-tol-um (default 1.0 um; pre-existing packer contacts are
+# grandfathered). Retune the character with --wave-u-sigma-um, --wave-g-sigma-um, --transition-um.
+run() {  # $1=tag  $2=alpha_bad_deg (peak waviness angle of the wavy half)
+    echo "=== ${1}: wavy half at alpha_bad=${2} deg (calm half 3.5 deg) ==="
+    python -m phantom_sim.run_plenoptic_local \
+        --out "${PARENT}/${1}" \
+        --alpha-bad "${2}" \
+        --wave-seed "${WAVE_SEED}"
+}
+
+run ctrl 3.5
+run a08  8
+run a18  18
+run a30  30
+
+echo "Done. Results in ${WORKDIR}/${PARENT} (each tag: local_recon.npy, bad_mask.npy, wave_gt.npz, local_metrics.json)."
+echo "Next (laptop): pull ${PARENT} back and build the ground-truth-free structure-tensor QC map from"
+echo "  local_recon.npy (analyze.py exp7_*), scored against bad_mask.npy."

@@ -1,0 +1,86 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 8 RESUME after the 2026-09-14 quota-abort.
+#
+# The first sweep (job 29399565) died mid-write of f=0.5 seed=2 when the
+# /dtu/3d-imaging-center GROUP QUOTA filled (df showed filesystem free space, but the
+# group quota was exhausted; the write returned ENOSPC, which truncated dose_f0.5_s2.pt
+# to 492 MB, left dose_metrics.json at 0 bytes, and even prevented the .err traceback
+# from being written). Completed and TRUSTWORTHY before the abort:
+#     dose_f1_full.pt      (the f=1 reference, intact)
+#     dose_f0.5_s0.pt      corr_fibre 0.9953   (from the .out log)
+#     dose_f0.5_s1.pt      corr_fibre 0.9953   (from the .out log)
+#
+# This resume reconstructs ONLY the rungs that never ran: f = 0.25, 0.10, 0.05, 0.02
+# (three seeds each). f=1 is rebuilt automatically as the correlation reference (the
+# driver always runs it first; ~16 min). f=0.5 is intentionally skipped here and its two
+# completed seeds are merged back in laptop-side from the log. 13 recons, ~3.5 h.
+#
+# Hardening vs the first run: PYTHONUNBUFFERED + python -u so a future death still leaves a
+# readable .err/.out (the first run's block-buffered stderr was lost), and
+# KMP_DUPLICATE_LIB_OK guards the known MKL/OpenMP duplicate-lib abort in this stack.
+# ==============================================================================
+#
+#BSUB -J exp8-resume                        # Job name (visible in bjobs)
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU, no sharing
+#BSUB -W 12:00                              # 13 recons of a 650x650x800 volume, ~3.5 h; safe ceiling
+#BSUB -n 4                                  # CPU slots (host: frame loading + flat-fielding + thinning)
+#BSUB -R "rusage[mem=12GB]"                 # HOST RAM per slot
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp8-resume-%J.out            # stdout (%J = job id)
+#BSUB -e logs/exp8-resume-%J.err            # stderr
+#BSUB -N -u <your-email>                    # email when the job finishes
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"  # holds phantom_sim/
+CONDA_ENV="pleno_v100_min"  # proven recon env (astra + torch); the driver needs no OpenCV. try_pleno also works.
+DATA_ROOT="/path/to/raw_data"
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+# /zhome is over quota: keep caches on node-local /tmp.
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# Hardening: force unbuffered output so a future crash leaves a readable .err/.out,
+# and guard the known MKL/OpenMP duplicate-lib abort in this numpy+torch+astra stack.
+export PYTHONUNBUFFERED=1
+export KMP_DUPLICATE_LIB_OK=TRUE
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments; the pinned torch predates
+# PyTorch 2.1 and errors out the moment it touches CUDA.
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+OUT=phantom_sim_results/exp8_dose
+
+# Clean the corrupt/stale artifacts from the aborted run so nothing misleading survives.
+# KEEP dose_f1_full.pt, dose_f0.5_s0.pt, dose_f0.5_s1.pt (all intact and reused).
+#   - dose_f0.5_s2.pt  : truncated 492 MB write from the abort.
+#   - dose_f0.1_s0.pt  : STALE leftover from an earlier submission (19:52, predates this job);
+#                        it is regenerated below as one of the f=0.10 rungs.
+#   - dose_metrics.json: 0-byte stub; the run rewrites it with f=1 + the four low rungs.
+rm -f "${OUT}/dose_f0.5_s2.pt" "${OUT}/dose_f0.1_s0.pt" "${OUT}/dose_metrics.json"
+
+# Resume: the four low rungs that never ran. f=1 reruns automatically as the reference.
+python -u -m phantom_sim.run_plenoptic_dose \
+    --data-root "${DATA_ROOT}" \
+    --out-dir "${OUT}" \
+    --doses "0.25,0.10,0.05,0.02" \
+    --seeds "0,1,2" \
+    --n-iter 200
+
+echo "Done. Results in ${WORKDIR}/${OUT}."
+echo "metrics.json now holds f=1 + f=0.25/0.10/0.05/0.02; f=0.5 (s0,s1) is merged in laptop-side."

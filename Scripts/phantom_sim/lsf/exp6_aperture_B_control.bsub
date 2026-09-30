@@ -1,0 +1,70 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 6 Variant B control: DENSE large array at 25 deg.
+#
+# Same 25 deg half-angle aperture as the exp6_aperture ha25 run, but a 57x57 array
+# (n_grid scaled with the span so the element pitch matches the baseline) instead of
+# 21x21. This isolates aperture from angular sampling: if the Variant A ha25 curve
+# fell short, this shows whether the shortfall was coarse angular sampling (fixed by
+# adding elements) rather than the aperture itself. Runs only the tilts around the
+# ha25 onset to keep the (expensive, 3249-image) reconstructions few.
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp6_aperture_B_control.bsub   (from workspace)
+# Run AFTER exp6_aperture.bsub so the ha25 sparse run exists to compare against.
+# ==============================================================================
+#
+#BSUB -J exp6-apB                           # Job name
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU, no sharing
+#BSUB -W 08:00                              # ~4 tilts x ~55 min (7.4x the 441-image cost); padded
+#BSUB -n 4                                  # CPU slots
+#BSUB -R "rusage[mem=12GB]"                 # HOST RAM per slot (bigger sinogram staging)
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -R "select[gpu80gb]"                  # 57x57 = 3249 sub-images: take the 80 GB A100
+#BSUB -o logs/exp6B-%J.out                  # stdout
+#BSUB -e logs/exp6B-%J.err                  # stderr
+#BSUB -N -u <your-email>                    # email when the job finishes
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"  # holds phantom_sim/ + phantom_sim_results/
+CONDA_ENV="pleno_v100_min"                  # confirm it matches the env exp5 ran in
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments (the pinned torch predates 2.1).
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+# Kept OUT of phantom_sim_results/exp6_aperture so it does not merge into the main exp6 figure.
+# Same ha25 ranges as Variant A, but --n-grid 57 (dense). Tilts around the ha25 onset only.
+python -m phantom_sim.run_plenoptic_tilt \
+    --out phantom_sim_results/exp6_aperture_bctrl/ha25_dense \
+    --source-range-um 60277 --det-range-um 486075 \
+    --n-grid 57 \
+    --thetas 15 20 25 30
+
+python -m phantom_sim.analyze --results phantom_sim_results/exp6_aperture_bctrl/ha25_dense || \
+    echo "per-array plot failed (rebuild locally)"
+
+# To compare dense vs sparse at 25 deg locally (both have half-angle 25, so they land at the same
+# x in the middle/right panels):
+#   python -c "from phantom_sim.analyze import exp6_aperture_figure as f; \
+#     f(['DataFiles/phantom_sim/exp6_aperture/ha25/tilt_metrics.json', \
+#        'DataFiles/phantom_sim/exp6_aperture_bctrl/ha25_dense/tilt_metrics.json'], \
+#       'DataFiles/phantom_sim/exp6_aperture_bctrl/figures/ha25_dense_vs_sparse.png')"
+
+echo "Done. Result in ${WORKDIR}/phantom_sim_results/exp6_aperture_bctrl/ha25_dense"

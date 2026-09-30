@@ -1,0 +1,82 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 7 (waypoint model): localized misalignment as a QC signal,
+# INDEPENDENT per-fibre waviness + POLYDISPERSE diameters, dense pack preserved.
+#
+# Difference from exp7_wavy2d (coherent shared-profile waviness): there every fibre shared one
+# undulation so the pack stayed dense only because neighbours moved TOGETHER. Here each fibre wanders
+# on its OWN momentum-driven path (commits to a direction, turns on collision) and the pack is kept
+# non-overlapping by RE-PACKING (moving the offenders) rather than shrinking -- so fvf ~0.4 is
+# preserved and the fibres take a realistic normal diameter distribution (12 +/- 2 um). Waypoints
+# every ~15 um are cubic-splined to full depth; every slice is relaxed to <= 0.05 um interpenetration.
+#
+# The wavy half (x > 0) is the localized defect; step_wavy grades the per-waypoint kick (severity).
+# Calibrated step_wavy -> wavy-half angle (K=35 waypoints):
+#   ctrl : step_wavy = step_calm = 0.35 -> ~3.5 deg uniform (defect-free control) -> QC map flat
+#   a08  : step_wavy = 0.85             -> ~8 deg  (within the 9.66 deg aperture)
+#   a18  : step_wavy = 1.9              -> ~18 deg (at the measured 17.8 deg onset)
+#   a30  : step_wavy = 3.0              -> ~30 deg (main demonstrator)
+# Each run saves the reconstruction + the wavy-half GT mask + the full fibre config & radii (for an
+# exact GT rebuild on the laptop); the ground-truth-free structure-tensor QC map is scored vs the mask.
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp7_waypoint.bsub   (from workspace)
+# ==============================================================================
+#
+#BSUB -J exp7-wp                            # Job name
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU
+#BSUB -W 5:00                               # per-slice re-pack (host) + 4 recons on a 256 frame
+#BSUB -n 4                                  # CPU slots (host: packing + waypoint re-pack + voxelise)
+#BSUB -R "rusage[mem=12GB]"                 # HOST RAM per slot
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp7-wp-%J.out                # stdout
+#BSUB -e logs/exp7-wp-%J.err                # stderr
+#BSUB -N -u <your-email>                    # email on finish
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"
+CONDA_ENV="pleno_v100_min"
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments (pinned torch predates PyTorch 2.1).
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+PARENT=phantom_sim_results/exp7_waypoint
+WAVE_SEED=0   # shared across the ladder: same base pack + wander seed, only step_wavy (severity) changes
+
+# Filled frame nx=ny=256 (512 um), domain 215 um -> ~500 fibres, ~84% rope; waypoints every 15 um;
+# overlap resolved to 0.05 um by moving (fvf preserved). Diameters N(12,2) um, clipped 9-15.
+run() {  # $1=tag  $2=step_wavy (per-waypoint kick of the wavy half; 0.35 = calm control level)
+    echo "=== ${1}: step_wavy=${2} (calm step 0.35), independent momentum waypoint wander ==="
+    python -m phantom_sim.run_plenoptic_waypoint \
+        --out "${PARENT}/${1}" \
+        --step-wavy "${2}" --step-calm 0.35 \
+        --waypoint-spacing-um 15 --overlap-tol-um 0.05 \
+        --persistence 0.74 --revert 0.14 --wave-seed "${WAVE_SEED}" \
+        --nx 256 --ny 256 --domain-radius-um 215 \
+        --diam-mean-um 12 --diam-std-um 2 --diam-min-um 9 --diam-max-um 15
+}
+
+run ctrl 0.35
+run a08  0.85
+run a18  1.9
+run a30  3.0
+
+echo "Done. Results in ${WORKDIR}/${PARENT} (each tag: local_recon.npy, bad_mask.npy, wave_gt.npz[cfg,radii], local_metrics.json)."
+echo "Next (laptop): pull ${PARENT} back and build the QC map + figures (GT rebuilds from wave_gt.npz cfg+radii)."

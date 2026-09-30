@@ -1,0 +1,82 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 4 tilt sweep: plenoptic angular bandwidth
+# Full dedicated A100, exclusive so nothing shares the card. One reconstruction per
+# tilt angle, so walltime scales with the number of angles.
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp4_tilt.bsub   (from workspace)
+# Monitor with:  bjobs -l <JOBID> ; tail -f logs/exp4-<JOBID>.out
+# Smoke first:   python -m phantom_sim.run_plenoptic_tilt --smoke --out /tmp/tilt_smoke
+# ==============================================================================
+#
+#BSUB -J exp4-tilt                          # Job name (visible in bjobs)
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU, no sharing
+#BSUB -W 16:00                              # Walltime HH:MM (one recon per angle; pad generously)
+#BSUB -n 4                                  # CPU slots (host side: packing + voxelisation)
+#BSUB -R "rusage[mem=8GB]"                  # HOST RAM per slot
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp4-%J.out                   # stdout (%J = job id)
+#BSUB -e logs/exp4-%J.err                   # stderr
+#BSUB -N -u <your-email>                    # email when the job finishes
+# To force the 80GB A100 for headroom, add:  #BSUB -R "select[gpu80gb]"
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"                # dir holding phantom_sim/ (the Scripts contents)
+CONDA_ENV="pleno_v100_min"                  # the env exp3 ran in (try_pleno also works)
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+# /zhome is over quota: keep caches on node-local /tmp.
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments; the pinned torch predates
+# PyTorch 2.1 and errors out ("Unrecognized CachingAllocator option") the moment it touches CUDA.
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+# Sweep 0..20 deg (0 is the straight-bundle reference). Trim the list if walltime is tight;
+# the array max half-angle prints at startup, so cluster the angles around it if you want a
+# sharper threshold. The transverse frame (--nx/--ny 384) must hold the tilted fibres; the
+# driver warns if a tilt shears them near the edge.
+python -m phantom_sim.run_plenoptic_tilt \
+    --out phantom_sim_results/exp4_tilt \
+    --thetas 0 2 4 6 8 10 12 15 20
+
+# --- EXTENDED SWEEP to 60 deg (future run) -------------------------------------------
+# The 0..20 run above holds corr at 0.844 even at 20 deg (2x the 9.66 deg array aperture),
+# so it never captures the full collapse. Extending to 60 deg traces the complete fall-off.
+# GEOMETRY CATCH: the bundle shears in X ONLY (tilt_config shears cfg[:,0,:]), about the
+# mid-slice, so the ends displace tan(theta)*(nz/2) voxels along x. At nz=256 that is ~222
+# vox at 60 deg, past the nx=384 frame margin (~132 vox) -> would measure field-of-view loss,
+# not angle. Fix: widen nx ONLY to 640 (margin ~260 vox > the ~222 needed); ny stays 384
+# since y never shears. That is ~1.5x the volume vs the 0..20 run.
+# LSF budget (measured on the 0..20 run: 5.8/32 GB host RAM, 66 min wall for 9 angles):
+# host RAM and the 16h walltime are non-binding; the extended run is ~14 angles at ~1.5x/angle
+# (~2.5-3 h). GPU is the only lever the wider frame touches; take the 80GB A100 for headroom
+# by adding "#BSUB -R select[gpu80gb]" above. To use, comment out the 0..20 call and uncomment:
+# python -m phantom_sim.run_plenoptic_tilt \
+#     --out phantom_sim_results/exp4_tilt_to60 \
+#     --nx 640 \
+#     --thetas 0 2 4 6 8 10 12 15 20 25 30 40 50 60
+# python -m phantom_sim.analyze --results phantom_sim_results/exp4_tilt_to60 || \
+#     echo "PLOT STEP FAILED (rebuild locally)"
+# ------------------------------------------------------------------------------------
+
+# Build the bandwidth figure in-job (non-fatal if it fails; can be rebuilt locally).
+python -m phantom_sim.analyze --results phantom_sim_results/exp4_tilt || \
+    echo "PLOT STEP FAILED (rebuild locally with analyze --results ...)"
+
+echo "Done. Results in ${WORKDIR}/phantom_sim_results/exp4_tilt"

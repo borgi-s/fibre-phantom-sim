@@ -1,0 +1,90 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 6 aperture sweep: does a LARGER array reconstruct
+# highly misaligned fibres? (follow-up to exp4)
+#
+# Variant A: spread the SAME 21x21 array further out, at four target half-angles
+# (~9.66, 15, 20, 25 deg), running the exp4 tilt sweep at each. The phantom is
+# byte-identical across sizes (fixed --seed 0), so ONLY the array geometry changes.
+# The exp6 figure (built at the end) shows the reconstruction onset moving outward
+# with the aperture: a wider array tolerates more fibre tilt.
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp6_aperture.bsub   (from workspace)
+# Monitor with:  bjobs -l <JOBID> ; tail -f logs/exp6-<JOBID>.out
+# Smoke first:   python -m phantom_sim.run_plenoptic_tilt --smoke --out /tmp/tilt_smoke
+# ==============================================================================
+#
+#BSUB -J exp6-aperture                      # Job name (visible in bjobs)
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU, no sharing
+#BSUB -W 12:00                              # 4 sizes x 8 tilts x ~7 min ~= 4 h; padded generously
+#BSUB -n 4                                  # CPU slots (host side: packing + voxelisation)
+#BSUB -R "rusage[mem=8GB]"                  # HOST RAM per slot (exp4 used 5.8/32 GB)
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp6-%J.out                   # stdout (%J = job id)
+#BSUB -e logs/exp6-%J.err                   # stderr
+#BSUB -N -u <your-email>                    # email when the job finishes
+# To force the 80GB A100 for headroom, add:  #BSUB -R "select[gpu80gb]"
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"  # holds phantom_sim/ + phantom_sim_results/
+CONDA_ENV="pleno_v100_min"                  # the env exp3/exp4/exp5 ran in (confirm it matches)
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+# /zhome is over quota: keep caches on node-local /tmp.
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments; the pinned torch predates
+# PyTorch 2.1 and errors out the moment it touches CUDA.
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+PARENT=phantom_sim_results/exp6_aperture
+
+# The bundle shears in X ONLY (tilt_config shears cfg[:,0,:]) about the mid-slice, so the ends
+# displace tan(theta)*(nz/2) voxels along x: ~90 vox at 35 deg, inside the nx=384 frame margin
+# (~132 vox). So 0..35 deg is safe at the default nx; do NOT push past ~44 deg without widening
+# --nx (see exp4_tilt.bsub for the to-60 recipe).
+TILTS="0 5 10 15 20 25 30 35"
+
+# half-angle = atan((source_range + det_range) / sdd);  sdd = 1171.57 mm = 1171570 um.
+# Both ranges scaled by k = tan(target)/tan(9.66) so the source:detector split is preserved:
+#   ~9.66 deg (baseline): 22000 / 177400
+#   15 deg:               34636 / 279292
+#   20 deg:               47048 / 379400
+#   25 deg:               60277 / 486075
+run() {  # $1=tag  $2=source_range_um  $3=det_range_um
+    echo "=== aperture ${1}: source_range=${2} um  det_range=${3} um ==="
+    python -m phantom_sim.run_plenoptic_tilt \
+        --out "${PARENT}/${1}" \
+        --source-range-um "${2}" --det-range-um "${3}" \
+        --thetas ${TILTS}
+    # Per-array bandwidth figure (non-fatal; the combined exp6 figure is the deliverable).
+    python -m phantom_sim.analyze --results "${PARENT}/${1}" || \
+        echo "  per-array plot failed for ${1} (rebuild locally)"
+}
+
+run ha10  22000  177400
+run ha15  34636  279292
+run ha20  47048  379400
+run ha25  60277  486075
+
+# Combined exp6 figure: corr-vs-tilt overlay, onset-vs-aperture (vs the y=x diagonal), and corr
+# at 20 deg tilt vs aperture. Globs PARENT/*/tilt_metrics.json, ordered by array half-angle.
+python -m phantom_sim.analyze --results "${PARENT}" --aperture-parent "${PARENT}" || \
+    echo "PLOT STEP FAILED (rebuild locally: analyze --results ${PARENT} --aperture-parent ${PARENT})"
+
+echo "Done. Results in ${WORKDIR}/${PARENT} (figures under ${PARENT}/figures/exp6_aperture.png)"

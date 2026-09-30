@@ -1,0 +1,93 @@
+#!/bin/bash
+# ==============================================================================
+# DTU HPC (LSF) -- Experiment 7 (v2): localized misalignment as a QC signal,
+# FILLED FRAME + ISOTROPIC (x+y) fibre waviness.
+#
+# Changes from exp7_localmisalign.bsub (the x-only, mostly-empty-frame v1):
+#   * Rope FILLS the frame: --nx 256 --ny 256 (voxel 2 um -> 512 um frame) with
+#     --domain-radius-um 215 -> rope diameter 430 um = 84% of the frame side, ~500
+#     fibres, ~19% fibre fill (was 2.8%). No fibres lost; ~40 um air margin (FOV-checked).
+#   * ISOTROPIC waviness: the fibre now wanders in BOTH x and y (a second, independent
+#     shared profile at wave_seed+1), the default. --wave-x-only reverts to x-only.
+#     The peak local orientation angle away from the fibre axis (the COMBINED x+y tilt)
+#     is graded from alpha_good on the calm half to alpha_bad on the wavy half.
+#
+# Everything else matches v1: the cross-section is split smoothly across x into a calm
+# half (alpha_good = 3.5 deg) and a wavy half (up to alpha_bad); the waviness is coherent
+# (all fibres share the undulations) so neighbours stay NON-OVERLAPPING (the driver asserts
+# no NEW interpenetration beyond --overlap-tol-um; pre-existing packer contacts grandfathered,
+# transition auto-widened if needed). Each run saves the reconstruction + a ground-truth
+# wavy-half mask + the waviness truth (incl. u_y/g_y); the structure-tensor orientation QC
+# map (ground-truth-free) is built on the laptop after pull-back and scored against the mask.
+#
+# alpha_bad ladder (array max ray half-angle 9.66 deg, 10% reconstruction-onset 17.8 deg):
+#   ctrl : alpha_bad = alpha_good = 3.5 deg (defect-free control) -> map must stay flat
+#   a08  : wavy half WITHIN the 9.66 deg aperture (below onset)   -> should still reconstruct
+#   a18  : wavy half AT the measured 17.8 deg onset               -> QC map should just light up
+#   a30  : wavy half well past onset                              -> main demonstrator
+# ==============================================================================
+# Submit with:   bsub < phantom_sim/lsf/exp7_wavy2d.bsub   (from workspace)
+# Monitor with:  bjobs -l <JOBID> ; tail -f logs/exp7-2d-<JOBID>.out
+# ==============================================================================
+#
+#BSUB -J exp7-wavy2d                        # Job name (visible in bjobs)
+#BSUB -q gpua100                            # A100 GPU queue
+#BSUB -gpu "num=1:mode=exclusive_process"   # 1 dedicated GPU, no sharing
+#BSUB -W 5:00                               # ~500 fibres -> heavier packing; 4 recons on a 256 frame
+#BSUB -n 4                                  # CPU slots (host side: packing + voxelisation)
+#BSUB -R "rusage[mem=12GB]"                 # HOST RAM per slot (more fibres than v1)
+#BSUB -R "span[hosts=1]"                    # single host
+#BSUB -o logs/exp7-2d-%J.out                # stdout (%J = job id)
+#BSUB -e logs/exp7-2d-%J.err                # stderr
+#BSUB -N -u <your-email>                    # email when the job finishes
+
+set -euo pipefail
+
+# >>> EDIT IF NEEDED >>>
+WORKDIR="/path/to/workspace"  # holds phantom_sim/ + phantom_sim_results/
+CONDA_ENV="pleno_v100_min"                  # the env exp3/exp4/exp5/exp6/exp7 ran in (confirm it matches)
+# <<< EDIT IF NEEDED <<<
+
+cd "${WORKDIR}"
+mkdir -p logs phantom_sim_results
+
+# /zhome is over quota: keep caches on node-local /tmp.
+export XDG_CACHE_HOME="/tmp/${USER}_xdg"
+export CUDA_CACHE_PATH="/tmp/${USER}_cudacache"
+export MPLCONFIGDIR="/tmp/${USER}_mpl"
+mkdir -p "${XDG_CACHE_HOME}" "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}"
+
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments; the pinned torch predates
+# PyTorch 2.1 and errors out the moment it touches CUDA.
+
+CONDA_BASE="${CONDA_BASE:-$(dirname "$(dirname "$(command -v conda)")")}"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV}"
+
+echo "Node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+PARENT=phantom_sim_results/exp7_wavy2d
+WAVE_SEED=0   # shared across the ladder: u(z)/g(z) (and u_y/g_y at +1) identical, only alpha_bad changes
+
+# Filled frame: nx=ny=256 (512 um), domain 215 um -> ~500 fibres, 84% rope, ~40 um air margin.
+# Isotropic x+y waviness is the DEFAULT (drop in --wave-x-only to revert). The calm/wavy transition
+# auto-widens if a config would add NEW interpenetration beyond --overlap-tol-um (default 1.0 um;
+# pre-existing packer contacts grandfathered). Retune character with --wave-u-sigma-um / --wave-g-sigma-um.
+run() {  # $1=tag  $2=alpha_bad_deg (peak COMBINED waviness angle of the wavy half)
+    echo "=== ${1}: wavy half at alpha_bad=${2} deg (calm half 3.5 deg), isotropic x+y ==="
+    python -m phantom_sim.run_plenoptic_local \
+        --out "${PARENT}/${1}" \
+        --alpha-bad "${2}" \
+        --wave-seed "${WAVE_SEED}" \
+        --nx 256 --ny 256 --domain-radius-um 215
+}
+
+run ctrl 3.5
+run a08  8
+run a18  18
+run a30  30
+
+echo "Done. Results in ${WORKDIR}/${PARENT} (each tag: local_recon.npy, bad_mask.npy, wave_gt.npz, local_metrics.json)."
+echo "Next (laptop): pull ${PARENT} back and build the ground-truth-free structure-tensor QC map from"
+echo "  local_recon.npy (analyze.py exp7_*), scored against bad_mask.npy."
