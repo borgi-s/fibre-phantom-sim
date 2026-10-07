@@ -16,3 +16,4 @@ scratchpad/
 .superpowers/
 _cache_*
 ~$*
+target/

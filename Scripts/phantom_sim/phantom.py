@@ -1,9 +1,14 @@
 """Torch-free fibre phantom voxelisation from a fibre-pack configuration."""
 import numpy as np
 
+try:  # optional compiled backend: rust_voxelize/ (pip install ./rust_voxelize)
+    from phantom_rs import voxelize_slices as _voxelize_slices_rs
+except ImportError:
+    _voxelize_slices_rs = None
+
 
 def voxelize_config(configuration, radii, transverse_shape, voxel_um,
-                    axis=0, mu_fibre=0.30, mu_matrix=0.28, supersample=4):
+                    axis=0, mu_fibre=0.30, mu_matrix=0.28, supersample=4, backend="auto"):
     """Rasterise per-slice fibre discs into an attenuation volume.
 
     configuration: (Z, 2, N) fibre centres in um, index 0 = x, index 1 = y.
@@ -19,15 +24,29 @@ def voxelize_config(configuration, radii, transverse_shape, voxel_um,
     (supersample=1) produces. Fibres are packed non-overlapping, so where discs touch the
     larger coverage wins (`np.maximum`). Only a small bounding box per fibre is touched, so
     anti-aliasing does not scale with the full transverse grid.
+
+    `backend`: "python", "rust" (the compiled `phantom_rs` port, bit-identical output,
+    slices in parallel) or "auto" (rust when installed, else python).
     """
     configuration = np.asarray(configuration, dtype=np.float64)
     radii = np.asarray(radii, dtype=np.float64)
     Z, _, N = configuration.shape
     ny, nx = transverse_shape
-    vol = np.full((Z, ny, nx), mu_matrix, dtype=np.float32)
     cx0 = (nx - 1) / 2.0
     cy0 = (ny - 1) / 2.0
     ss = max(1, int(supersample))
+    if backend == "rust" or (backend == "auto" and _voxelize_slices_rs is not None):
+        if _voxelize_slices_rs is None:
+            raise ImportError("backend='rust' needs phantom_rs: pip install ./rust_voxelize")
+        vol = _voxelize_slices_rs(np.ascontiguousarray(configuration),
+                                  np.ascontiguousarray(radii), int(ny), int(nx),
+                                  float(voxel_um), float(mu_fibre), float(mu_matrix), ss)
+        if axis != 0:
+            vol = np.moveaxis(vol, 0, axis)
+        return np.ascontiguousarray(vol, dtype=np.float32)
+    if backend not in ("auto", "python"):
+        raise ValueError(f"unknown backend {backend!r}")
+    vol = np.full((Z, ny, nx), mu_matrix, dtype=np.float32)
     sub = (np.arange(ss) + 0.5) / ss - 0.5          # subpixel offsets in (-0.5, 0.5)
     delta = mu_fibre - mu_matrix
     for zi in range(Z):
